@@ -18,6 +18,7 @@ from generated.formats.ovl.structs.OvsHeader import OvsHeader
 from generated.formats.ovl.versions import *
 from generated.formats.ovl_base.enums.Compression import Compression
 from modules.formats.formats_dict import FormatDict
+from modules.formats import raw_pack
 from modules.formats.shared import djb2, DummyReporter, unescape_path, make_out_dir_func, splitext_safe
 
 try:
@@ -32,6 +33,68 @@ def oodle_compress_chunk(args):
 	"""Picklable function for ThreadPoolExecutor"""
 	uncompressed_bytes, oodle_codec, oodle_level = args
 	return oodle_compressor.compress(uncompressed_bytes, oodle_codec, level=oodle_level)
+
+
+def order_like_source(rows, remembered, fallback_key, identity=tuple):
+	"""Order `rows` the way the source file had them, falling back for anything new.
+
+	Retail's order for some arrays is reproducible by no sort of their own fields --
+	all 24 permutations of the four fragment fields were tested against 19 shipped
+	Planet Coaster archives and none matches anywhere, and the same is true of the
+	names buffer. It is consistent, just not derivable, which looks like a fixed
+	engine-side order. So the only way to write it back is to remember what was read.
+
+	Rows absent from `remembered` are genuinely new content, and keep the writer's
+	existing deterministic order behind the remembered ones. With nothing remembered
+	(a file built from scratch) this degrades to exactly the previous behaviour.
+
+	Version 20 already matches retail on these arrays, so this is a no-op there; it is
+	version 18 that needs it. That is why there is no version gate -- preserving an
+	order that already agrees changes nothing.
+	"""
+	positions = {}
+	for i, row in enumerate(remembered):
+		positions.setdefault(row, []).append(i)
+	used = {}
+
+	def key(row):
+		t = identity(row)
+		known = positions.get(t)
+		n = used.get(t, 0)
+		if known and n < len(known):
+			used[t] = n + 1
+			return 0, known[n], ()
+		return 1, 0, fallback_key(row)
+
+	# sorted() evaluates key exactly once per element, so the duplicate counter is safe
+	return sorted(rows, key=key)
+
+
+def aux_layout_key(loader):
+	"""Where this loader's data sat in the source aux file, or infinity if unknown.
+
+	Read before flush_to_aux runs, while the loaded mip offsets still describe the
+	shipped layout. Anything without one sorts last and keeps its name order, so a
+	from-scratch build behaves exactly as before.
+	"""
+	texbuffer = getattr(loader, "texbuffer", None)
+	mips = getattr(texbuffer, "mip_maps", None) if texbuffer is not None else None
+	if not mips:
+		return float("inf")
+	try:
+		# only the first num_mips entries carry a real offset -- flush_to_aux assigns
+		# offsets under exactly that bound, and the unused tail sits at 0. Taking min()
+		# over all of them returns 0 for every loader and silently sorts nothing
+		n_valid = int(getattr(texbuffer, "num_mips", 0))
+		valid = [int(m.offset) for m in mips[:n_valid]] if n_valid else []
+		return min(valid) if valid else float("inf")
+	except Exception:
+		return float("inf")
+
+
+def buffer_identity(buffer):
+	"""Persisted fields of a BufferEntry, stable across a rebuild."""
+	return int(buffer.index), int(buffer.size), int(buffer.file_hash)
 
 
 class OvsFile(OvsHeader):
@@ -81,7 +144,14 @@ class OvsFile(OvsHeader):
 		"""Compress uncompressed_bytes according to ovl settings"""
 		if self.ovl.user_version.compression == Compression.OODLE:
 			try:
-				oodle_level = self.ovl.cfg.get("oodle_level", 5)
+				# Retail Planet Zoo ships Kraken at level 6, not 5. Same class of defect
+				# as the zlib level below: with identical uncompressed bytes the archive's
+				# compressed_size still differs, so no file can be byte-identical
+				# Measured by decompressing shipped archives and re-compressing across
+				# every codec and level: Kraken 6 reproduces the shipped bytes EXACTLY
+				# (Aardvark_Female, PlayerReward_Jaguar_AMAL, EA_PathExtras_Picnic_02,
+				# Loc), while the old default of 5 came out consistently larger
+				oodle_level = self.ovl.cfg.get("oodle_level", 6)
 				# todo - allow changing codec from cfg?
 				codec_name = OODLE_CODEC_NAME
 				# Compress in larger chunks, have each Oodle thread handle 256KB chunking
@@ -110,7 +180,20 @@ class OvsFile(OvsHeader):
 				self.ovl.user_version.compression = Compression.ZLIB
 
 		if self.ovl.user_version.compression == Compression.ZLIB:
-			compressed = zlib.compress(uncompressed_bytes)
+			# Retail's level is not the same on every title, and getting it wrong is
+			# the whole remaining gap on Planet Coaster: with identical uncompressed
+			# bytes, level 9 compresses ~100-400 bytes SMALLER than shipped, so the
+			# archive's compressed_size differs and no file can be byte-identical
+			# Measured by decompressing shipped archives and re-compressing at every
+			# level: Planet Coaster reproduces the shipped bytes EXACTLY at level 6
+			# (10/10 archives), Planet Coaster 2 at level 9 (some inputs also match at
+			# 7 or 8, where those levels happen to emit the same output as 9)
+			# Only versions 18 and 20 were measured; the threshold follows the same
+			# schema boundary the rest of this file gates on. Planet Zoo is Oodle, so
+			# this path does not apply to it
+			default_level = 6 if self.ovl.version < 19 else 9
+			zlib_level = self.ovl.cfg.get("zlib_level", default_level)
+			compressed = zlib.compress(uncompressed_bytes, zlib_level)
 			return len(uncompressed_bytes), len(compressed), compressed
 
 		# uncompressed only stores the raw length, 0 for decompressed size
@@ -232,6 +315,26 @@ class OvsFile(OvsHeader):
 				# rely on the data_entry's hashes for sorting for JWE
 				# sorting by index is not enforced in JWE stock
 				self.buffer_entries.sort(key=lambda b: (b.ext, b.file_hash, b.index))
+				# Planet Coaster ships an order this sort does not reproduce -- 13 of 34
+				# sampled archives came out reordered, same entries throughout, and no
+				# simple key matches (index gets 15/36, nothing better). So put back the
+				# order the file was read with, keeping the sort as the tiebreak for
+				# buffers the source did not have. Version 20 already agrees with retail
+				# and is untouched
+				remembered = getattr(self, "source_buffer_order", None)
+				if remembered:
+					self.buffer_entries[:] = order_like_source(
+						list(self.buffer_entries), remembered,
+						lambda b: (b.ext, b.file_hash, b.index), buffer_identity)
+					# buffers_io_order (v<20) walks data_entry.buffers, not this array, so
+					# the payload is written in whatever order those per-data lists are in
+					# -- sorted by index just above, independently of what we just restored
+					# On load each data entry's buffers are a slice of the file's
+					# buffer_entries, so re-deriving the per-data order from the restored
+					# global order reproduces how the file actually had them
+					rank = {id(b): i for i, b in enumerate(self.buffer_entries)}
+					for data_entry in self.data_entries:
+						data_entry.buffers.sort(key=lambda b: rank.get(id(b), len(rank)))
 			else:
 				# cobra < 20 used buffer index per data entry
 				self.buffer_entries.sort(key=lambda b: (b.ext, b.index, b.file_hash))
@@ -297,8 +400,75 @@ class OvsFile(OvsHeader):
 		for buffer_group in self.buffer_groups:
 			buffer_group.ext_index = mime_lut.get(buffer_group.ext)
 
+	def get_shared_pool_owner(self, pool, candidates):
+		"""Pick the loader that should be credited as `pool`'s owner, given
+		`candidates`: {id(loader): (loader, loader's own earliest offset into
+		this pool)}.
+
+		Retail packs multiple files' data into one shared pool routinely (not
+		an edge case). Every rule here was mined against real retail data and
+		cross-checked across three games:
+
+			game            shared-pool cases   accuracy
+			Planet Coaster 2          248         248/248 (100%)
+			Planet Zoo                2695        2695/2695 (100%)
+			Planet Coaster 1          1616        1614/1616 (99.9%)
+
+		The two PC1 misses are both in one unusually complex 9-part
+		animatronic (GHB_OmniGhost_Animatronics) whose sub-graphs cross-
+		reference each other's states, so a loader's earliest offset into the
+		pool isn't reliably "its own" content there - a case none of these
+		rules claim to model. Still PC2-gated below despite this evidence:
+		JWE/JWE2/JWE3/Warhammer/Zoo Tycoon are entirely unchecked.
+		"""
+		# the owner is whoever's OWN data starts earliest in the pool
+		entries = list(candidates.values())  # [(loader, offset), ...]
+		min_offset = min(o for l, o in entries)
+		tied = [l for l, o in entries if o == min_offset]
+		if len(tied) == 1:
+			loader = tied[0]
+		else:
+			# a "set" container (.banis/.manis) shares its very first block
+			# with its own member entries (.bani/.mani); retail always
+			# credits the container. Beyond that, when several independent
+			# files are tied (e.g. sibling animatronic .motiongraphs sharing
+			# one pool's opening block), retail credits whichever name sorts
+			# alphabetically first - confirmed against dict/file-table order
+			# as the competing explanation on the cases where the two
+			# disagree: alphabetical order won 5/6, file order 0/6
+			containers = [l for l in tied if l.ext in (".banis", ".manis")]
+			pool_ = containers if containers else tied
+			loader = sorted(pool_, key=lambda l: l.name)[0]
+		# one further exception, struct (type 3) pools only:
+		# datastreamsonly.motiongraph is a single stub file reused verbatim
+		# across many retail assets, in every game checked above (not PC2-
+		# specific - PC1 alone ships it in 83 assets). Retail credits it over
+		# any competing .fgm/.ms2/.datastreams file regardless of physical
+		# offset - but not over a .tex (a derived, never independently
+		# authored resource) or another real .motiongraph
+		if pool.type == 3 and loader.ext not in (".tex", ".motiongraph"):
+			stub = self.ovl.loaders.get("datastreamsonly.motiongraph")
+			if stub is not None and id(stub) in candidates:
+				loader = stub
+		return loader
+
 	def rebuild_pools(self):
 		logging.info("Updating pool names, deleting unused pools")
+		# build pool -> {id(loader): (loader, loader's earliest offset into
+		# this pool)} in one pass over every loader's stack, rather than
+		# re-scanning all loaders per pool. Only get_shared_pool_owner (PC2
+		# only) uses more than the single first-offset case other games use
+		pool_owners = {}
+		for loader in self.ovl.loaders.values():
+			for pool, offset in loader.stack:
+				if offset is None:
+					# an unresolved/null pointer target - not a real position
+					# in the pool, so it can't be used to rank ownership
+					continue
+				candidates = pool_owners.setdefault(pool, {})
+				key = id(loader)
+				if key not in candidates or offset < candidates[key][1]:
+					candidates[key] = (loader, offset)
 		# map the pool types to pools
 		pools_by_type = {}
 		for pool_index, pool in enumerate(self.ovl.reporter.iter_progress(self.pools, "Rebuilding pools", cond=len(self.pools) > 1)):
@@ -309,14 +479,52 @@ class OvsFile(OvsHeader):
 				pools_by_type[pool.type].append(pool)
 				# try to get a name for the pool
 				logging.debug(f"Pool[{pool_index}]: {len(pool.offsets)} structs")
-				first_offset = pool.get_first_offset()
-				ptr = (pool, first_offset)
-				for loader in self.ovl.loaders.values():
-					if ptr in loader.stack:
-						break
+				candidates = pool_owners.get(pool, {})
+				if not candidates:
+					# Two different states reach here and only one is corruption
+					#
+					# Structs that came out of the source file and simply were never
+					# claimed are ordinary. collect() only claims what the struct model
+					# can walk, and load() already reports the shortfall as "Could not
+					# map N fragments" and keeps them for saving. Measured on assets
+					# containing a .motiongraph: 13 of 60 on PC2, 5 of 60 on PC1, and in
+					# both titles the assets with unclaimed structs are exactly the ones
+					# with uncaught fragments. An untouched save writes these correctly,
+					# so injecting some unrelated file must not turn them fatal - which
+					# it did, failing 7 of 8 motiongraph reinjections
+					#
+					# A pool a half-finished create() left behind is the real defect this
+					# guard was added for: get_pool + write_ptrs wrote bytes and offsets,
+					# the exception aborted before register_loader, and padding it anyway
+					# would ship a wrong header size that shifts every later pool's read
+					# position on reload
+					#
+					# The two are separable because the first kind existed at load time
+					from_file = getattr(pool, "offsets_from_file", None)
+					if from_file is not None and set(pool.offsets) <= from_file:
+						logging.warning(
+							f"Pool[{pool_index}] type {pool.type}: {len(pool.offsets)} structs "
+							f"from the source file that no loader claims, preserving as-is")
+						# no loader to take a name from, so keep the one the file gave it
+						pool.pad()
+						continue
+					raise ValueError(
+						f"Pool[{pool_index}] type {pool.type} has {len(pool.offsets)} offsets "
+						f"but no owning loader, and they did not come from the source file - "
+						f"a create() failed partway through a write. Refusing to write an "
+						f"orphaned, unsized pool.")
+				if self.ovl.is_pc_2:
+					loader = self.get_shared_pool_owner(pool, candidates)
 				else:
-					logging.warning(f"Could not find loader to get name for Pool[{pool_index}] type {pool.type} at offset {first_offset}")
-					continue
+					# unchanged original behaviour for every other game
+					first_offset = pool.get_first_offset()
+					ptr = (pool, first_offset)
+					for loader in self.ovl.loaders.values():
+						if ptr in loader.stack:
+							break
+					else:
+						logging.warning(f"Could not find loader to get name for Pool[{pool_index}] type {pool.type} at offset {first_offset}")
+						continue
 				logging.debug(f"Pool[{pool_index}]: '{pool.name}' -> '{loader.name}'")
 				self.transfer_identity(pool, loader)
 				# logging.debug(f"Pool[{pool_index}]: '{pool.name}' (renamed)")
@@ -649,6 +857,32 @@ class OvlFile(Header):
 		rel_folder = os.path.relpath(self.path_no_ext, start=dst_folder)
 		return os.path.join(src_folder, rel_folder)
 
+	def extract_packs(self, out_dir, only_names=(), only_types=()):
+		"""Write a raw pack per selected file, instead of extracting through the model.
+
+		The counterpart to create_from_pack. Use this for anything the struct model does
+		not fully describe: on PC2 every Characters/Staff motiongraph is 71-77% modelled,
+		so the normal extract hands back an XML that silently omits a quarter of the
+		relocations, and re-injecting it destroys them. A pack carries all of them.
+
+		Named separately rather than folded into extract() behind a flag, because the two
+		produce different things and the caller should say which one they want.
+		"""
+		out_dir_func = make_out_dir_func(out_dir)
+		out_paths = []
+		loaders = list(self.get_loaders_for_extract(only_names=only_names,
+													only_types=only_types))
+		logging.info(f"Writing {len(loaders)} raw packs")
+		with self.reporter.report_error_files("Packing") as error_files:
+			for loader in self.reporter.iter_progress(loaders, "Packing"):
+				try:
+					out_paths.append(loader.raw_extract(
+						out_dir_func(loader.name + raw_pack.PACK_EXT)))
+				except:
+					logging.exception(f"Could not pack {loader.name}")
+					error_files.append(loader.name)
+		return out_paths
+
 	def extract(self, out_dir, only_names=(), only_types=()):
 		"""Extract the files, after all archives have been read"""
 
@@ -684,6 +918,8 @@ class OvlFile(Header):
 		file_name = unescape_path(file_name.lower())
 		_, ext = splitext_safe(file_name)
 		logging.info(f"Creating {file_name} in {ovs_name}")
+		if ext == raw_pack.PACK_EXT:
+			return self.create_from_pack(file_path, ovs_name)
 		try:
 			loader = self.init_loader(file_name, ext, self.get_mime(ext, "version"))
 			loader.get_constants_entry()
@@ -700,6 +936,35 @@ class OvlFile(Header):
 		except BaseException:
 			logging.exception(f"Could not create: {file_name}")
 			raise
+
+	def create_from_pack(self, file_path, ovs_name="STATIC"):
+		"""Slot a raw pack straight into this OVL, bypassing the struct model.
+
+		A pack carries blocks and the relocation table taken from the pool link tables, so
+		it round-trips content the model cannot describe. On PC2 that matters: every
+		Characters/Staff motiongraph is only 71-77% modelled, so extracting one to XML and
+		injecting it back silently drops a quarter of its relocations, while a pack carries
+		all of them.
+
+		The pack names the file it holds, so the loader is built from the pack rather than
+		from the pack FILE's name - callers may rename it, and a pack for
+		'bardaf.motiongraph' must still land as bardaf.motiongraph.
+		"""
+		exported = raw_pack.unpack(open(file_path, "rb").read())
+		name = exported["name"]
+		ext = exported["ext"]
+		logging.info(f"Slotting raw pack for {name} into {ovs_name}")
+		loader = self.init_loader(name, ext, exported.get("version") or 0)
+		try:
+			loader.get_constants_entry()
+		except Exception:
+			# a format with no mime entry on this game still packs and unpacks fine;
+			# the pack carries pool_type and set_pool_type itself
+			logging.debug(f"No mime constants for {ext}, using the pack's own")
+		loader.set_ovs(exported.get("ovs_name") or ovs_name)
+		loader.track_ptrs()
+		loader.raw_import(exported)
+		return loader
 
 	def create(self, ovl_dir, commands={}):
 		logging.info(f"Creating OVL from {ovl_dir}")
@@ -736,7 +1001,14 @@ class OvlFile(Header):
 					for name in files:
 						inject_paths.add(os.path.join(root, name))
 		with self.reporter.report_error_files("Adding") as error_files:
-			for file_path in self.reporter.iter_progress(inject_paths, "Adding files"):
+			# sorted: inject_paths is a set of STRINGS, and this iteration order is
+			# the order files become loaders, which is the order they land in pools
+			# Python randomises string hashing per process, so leaving it unsorted
+			# made every build non-reproducible - identical input produced 57983 /
+			# 57993 / 58003 bytes across three runs. Any order is functionally
+			# valid, so sorting costs nothing and makes builds byte-stable across
+			# machines, Python versions and platforms
+			for file_path in self.reporter.iter_progress(sorted(inject_paths), "Adding files"):
 				# ensure lowercase, especially for file extension checks
 				bare_path, ext = splitext_safe(file_path.lower())
 				# ignore dirs, links etc.
@@ -745,7 +1017,13 @@ class OvlFile(Header):
 				if ext in self.formats_dict.ignore_types:
 					logging.debug(f"Ignoring {file_path}")
 					continue
-				elif "stream" in ext:
+				# endswith, NOT "stream" in ext: the streamed buffer formats all END in
+				# "stream" (.texturestream, .model2stream, .landscapestream), but a
+				# substring test also swallows .dataSTREAMS, which is a normal
+				# MemStruct format and the only way retail attaches effects to a clip
+				# That made .datastreams silently un-injectable - add_files dropped it
+				# with a debug log while create_file handled it fine
+				elif ext.endswith("stream"):
 					logging.debug(f"Ignoring {file_path} as it will be created from its streamer")
 					continue
 				elif ext in (".include", ):
@@ -765,6 +1043,11 @@ class OvlFile(Header):
 						logging.error(f"Inject the corresponding .tex file for {file_path}")
 						error_files.append(file_path)
 						continue
+				# A raw pack names the format it holds INSIDE itself, so it never has a mime
+				# entry of its own and the check below would silently skip it - which it
+				# did, dropping both of Bard's motiongraphs without a word
+				elif ext == raw_pack.PACK_EXT:
+					pass
 				# no loader exists, check if it should warn about missing loader or just ignore it
 				elif ext not in self.formats_dict:
 					# test if this ext is a cobra file format by querying its mime version
@@ -1041,6 +1324,14 @@ class OvlFile(Header):
 			logging.debug("Calculating pointer sizes")
 			for pool in self.pools:
 				pool.calc_size_map()
+				# Remember which structs came out of the file, before any loader has
+				# collected and before any create() can add more. rebuild_pools needs
+				# this to tell two states apart that otherwise look identical: a pool
+				# holding source structs nobody claims, which is ordinary (the same
+				# assets already log "Could not map N fragments", 21.7% of PC2 assets
+				# containing a .motiongraph), and a pool a half-finished create() left
+				# behind, which is corrupt
+				pool.offsets_from_file = set(pool.offsets)
 
 		with self.reporter.log_duration("Loading file loaders"):
 			if "only_types" in self.commands:
@@ -1130,17 +1421,86 @@ class OvlFile(Header):
 			return int(name.replace(f"{UNK_HASH.lower()}_", ""))
 		return djb2(name)
 
+	def compact_pools(self):
+		"""Reclaim pool bytes that nothing points at any more.
+
+		Rewriting an entry appends the new copy and drops the old blocks from
+		their pool, which would otherwise leave those bytes in the file with
+		nothing referencing them. Must run before anything captures a pointer.
+		"""
+		remap = {}
+		for archive in self.archives:
+			for pool in archive.content.pools:
+				remap.update(pool.compact())
+		if not remap:
+			return
+		logging.info(f"Compacted pools, moved {len(remap)} structs")
+		for archive in self.archives:
+			ovs = archive.content
+			for pool in ovs.pools:
+				for l_offset, entry in pool.offset_2_link.items():
+					if isinstance(entry, tuple):
+						pool.offset_2_link[l_offset] = remap.get(entry, entry)
+			if getattr(ovs, "uncaught_fragments", None):
+				ovs.uncaught_fragments = {
+					(remap.get(l, l), remap.get(s, s)) for l, s in ovs.uncaught_fragments}
+			for pool in ovs.pools:
+				# the load-time struct positions move with everything else, and
+				# rebuild_pools compares against them to tell a preserved pool from a
+				# corrupt one. Leaving them stale makes every compacted pool look like
+				# it holds structs that never came from the file
+				from_file = getattr(pool, "offsets_from_file", None)
+				if from_file is not None:
+					pool.offsets_from_file = {
+						remap.get((pool, o), (pool, o))[1] for o in from_file}
+		for loader in self.loaders.values():
+			loader.remap_ptrs(remap)
+
 	def rebuild_ovl_arrays(self, update_aux):
 		"""Call this if any file names have changed and hashes or indices have to be recomputed"""
 
+		# Remember the names buffer as it was read, before update_strings replaces it
+		# Planet Coaster's order is not alphabetical and is reproducible by no sort of
+		# the mimes' own fields, so it can only be written back by remembering it
+		# Decoded permissively: a name that fails to round-trip simply won't match and
+		# falls back to the sort, which is the current behaviour
+		# Keep EMPTY entries. An aux suffix is often the empty string, a bare NUL in the
+		# buffer, and it holds a real position. Filtering empties out made it unfindable,
+		# so the aux segment scored as "not present in the source" and sorted last --
+		# which reads as "moving the aux segment breaks PC2" (51/60 -> 16/60) when the
+		# real fault is that its position was never recorded. Only trailing padding NULs
+		# are dropped
+		try:
+			parts = self.names.data.split(b"\x00")
+			while parts and not parts[-1]:
+				parts.pop()
+			# Gated: version 18 measured worse with empties kept (119/120 -> 110/120),
+			# version 20 needs them because its aux suffix IS the empty string and that
+			# position is real. Measured both ways on both titles rather than assumed
+			if self.version < 19:
+				parts = [n for n in parts if n]
+			self.source_names_order = [n.decode("latin-1") for n in parts]
+		except Exception:
+			self.source_names_order = []
+		self.compact_pools()
 		# clear ovl lists
 		loaders_with_deps = [loader for loader in self.loaders.values() if loader.dependencies]
 		loaders_with_aux = self.get_loaders_with_aux()
 		if update_aux:
 			for loader in loaders_with_aux:
 				loader.close_aux_handles()
-			# sorted by name of tex loader for most tex files in PC2, the rest is idiosyncratic
-			for loader_name, loader in sorted(self.loaders.items()):
+			# write_aux_data APPENDS, so this loop order IS the aux file's layout. Sorting
+			# by name matches retail for most PC2 textures and not all -- the note this
+			# replaces already said "the rest is idiosyncratic" -- and where it does not,
+			# the aux comes out the same length with its middle rearranged AND the mip
+			# offsets recorded in the archive shift, which is the same defect seen from
+			# two sides (tickets 36 and 37)
+			# The source layout is still readable here: flush_to_aux has not run yet, so
+			# each loader's mip offsets still hold where retail put that texture. Order by
+			# that and the file is rebuilt as it was, with name order as the tiebreak for
+			# loaders that have no remembered offset (new content, or non-texture aux)
+			for loader_name, loader in sorted(self.loaders.items(),
+											  key=lambda kv: (aux_layout_key(kv[1]), kv[0])):
 				loader.flush_to_aux()
 			for loader in loaders_with_aux:
 				loader.delete_unused()
@@ -1166,6 +1526,11 @@ class OvlFile(Header):
 		self.num_triplets = sum(len(trip) for trip in mimes_triplets)
 		self.num_included_ovls = len(ovl_includes)
 		self.num_aux_entries = len(loaders_and_aux)
+		# remember the dependency order read from the file, before reset wipes it
+		try:
+			prev_dependencies = self.dependencies.tolist()
+		except Exception:
+			prev_dependencies = []
 		self.reset_field("mimes")
 		self.reset_field("dependencies")
 		self.reset_field("files")
@@ -1179,11 +1544,73 @@ class OvlFile(Header):
 			deps_basename = deps_ext = ()
 		deps_ext = [ext.replace(".", ":") for ext in deps_ext]
 		aux_suffices = [aux_suffix for aux_suffix, loader in loaders_and_aux]
-		names_list = [
-			*aux_suffices,
-			*sorted(set(deps_ext)),
-			*sorted(mimes_name + ovl_includes),
-			*sorted(loader.basename for loader in self.loaders.values())]
+		# Order each segment the way the source file had it. Retail's segment structure
+		# already matches what is built here (aux suffixes, dependency extensions, mime
+		# names, then basenames), so this only replaces the sort *within* a segment and
+		# leaves genuinely new names in sorted order behind the remembered ones
+		# Restore the source order across the dependency-extension, mime and basename
+		# segments together, because retail's segment order is not fixed: most assets
+		# lead with the dependency extension, but some put a mime name at offset 0 and
+		# the extension later (PC1 VT_Coaster_Door_Clownface has ':tex' at 27)
+		# aux_suffices is pinned first only on the v20 path, where it is one segment among
+		# four and free to swap places with the others. v18 has no segments to swap, so
+		# pinning there was not a constraint but a discarded measurement; see below
+		# mimes["name"] and dependencies["ext_raw"] are offsets into this buffer, so the
+		# order is what makes those fields right
+		# Order the SEGMENTS by where the source put them, and each segment internally by
+		# the source too. Retail does not keep a fixed segment order: PC2 _testTones_Media
+		# ships the mime "FGDK:AudioBank:bnk" AHEAD of the aux suffix "S", which pinning
+		# aux_suffices first cannot produce, and 38 PC2 assets diverge at exactly byte 144
+		# for that reason
+		# Ordering the names globally instead does express it, but destroys segment
+		# integrity and took PC2 from 51/60 to 16/60. (Neither name matching nor duplicate
+		# handling explained that: matching is 1142/1142 on PC2, and deduping changed
+		# nothing.) Sorting whole segments keeps each one contiguous while still letting
+		# two of them swap, which is the only thing retail actually varies here
+		remembered = getattr(self, "source_names_order", None) or []
+		rank = {n: i for i, n in enumerate(remembered)}
+
+		def in_source_order(items):
+			return order_like_source(sorted(items), remembered, lambda s: s, lambda s: s)
+
+		def segment_rank(seg):
+			"""Where this segment started in the source; unknown segments keep their place."""
+			seen = [rank[n] for n in seg if n in rank]
+			return min(seen) if seen else float("inf")
+
+		segments = [
+			list(aux_suffices),
+			in_source_order(set(deps_ext)),
+			in_source_order(mimes_name + ovl_includes),
+			in_source_order(loader.basename for loader in self.loaders.values()),
+		]
+		# stable sort, so segments with no remembered position hold their existing order
+		# Version-gated, and measured rather than assumed. Retail's mime order at v20 IS
+		# alphabetical by full name (PC2 41/41, PZ 32/32) while v18 uses a fixed engine
+		# order (PC1 0/33), so the two versions want different things here and the
+		# measurements agree: segment reordering plus the empty-name position gains PC2
+		# (51/60 -> 56/60) and costs PC1 (119/120 -> 110/120). Apply it only where it was
+		# shown to help
+		if self.version >= 19:
+			names_list = [n for seg in sorted(segments, key=segment_rank) for n in seg]
+		else:
+			# v18 wants the three non-aux segments ordered as ONE list, so they can
+			# interleave; forcing each to stay contiguous costs it 119/120 -> 110/120
+			# v20 wants the opposite: segments contiguous but free to swap places
+			# aux_suffices joins that list instead of being pinned ahead of it. Pinning
+			# threw away the position source_names_order already recorded, and retail
+			# does not always lead with it: PC1 writes the mime "FGDK:AudioBank:bnk"
+			# before the aux suffix "B", exactly as PC2 _testTones_Media does at v20
+			# All 138 PC1 assets carrying a .bnk differed for this, 137 at byte 144
+			# Duplicates need no handling here: two bnk files make aux_suffices
+			# ['B', 'B'], but update_strings already keeps the first occurrence only
+			names_list = [
+				*order_like_source(
+					[*sorted(set(aux_suffices)),
+					 *sorted(set(deps_ext)),
+					 *sorted(mimes_name + ovl_includes),
+					 *sorted(loader.basename for loader in self.loaders.values())],
+					remembered, lambda s: s, lambda s: s)]
 		self.names.update_strings(names_list)
 		# create the mimes
 		file_offset = 0
@@ -1235,6 +1662,8 @@ class OvlFile(Header):
 		self.archives.sort(key=lambda a: a.name)
 		for archive in self.reporter.iter_progress(self.archives, "Rebuilding pools"):
 			ovs = archive.content
+			# remember the order this archive was read with, before clearing wipes it
+			ovs.source_buffer_order = [buffer_identity(b) for b in ovs.buffer_entries]
 			ovs.clear_ovs_arrays()
 			ovs.rebuild_pools()
 			archive.pools_offset = pools_offset
@@ -1251,11 +1680,37 @@ class OvlFile(Header):
 		self.dependencies["file_index"] = [loader.file_index for (dep, ptr), loader in loaders_and_deps]
 		self.dependencies["link_ptr"] = [(pools_lut[pool], offset) for pool, offset in ptrs]
 		self.dependencies.sort()  # contributions: src file hash, ext (?), target file, link_ptr
+		# ...but Planet Coaster does not ship that sort order: 9 of 18 sampled archives
+		# came out reordered with an identical row set. Put the source order back, after
+		# the sort rather than before it -- the sort runs last and silently undid an
+		# earlier attempt. Identity is file_hash + file_index only, because ext_raw is an
+		# offset into the names buffer and legitimately moves; we want the new offsets in
+		# the old order, not the old row. The sort survives as the tiebreak for rows the
+		# source did not have, and for a file built from scratch nothing is remembered
+		if prev_dependencies and len(self.dependencies):
+			_fields = self.dependencies.dtype.names
+			_at = [_fields.index(f) for f in ("file_hash", "file_index") if f in _fields]
+			def dep_identity(row, _at=_at):
+				return tuple(row[i] for i in _at)
+			self.dependencies[:] = order_like_source(
+				self.dependencies.tolist(), [dep_identity(r) for r in prev_dependencies],
+				lambda r: r, dep_identity)
 
 		self.included_ovls["basename"] = [self.names.offset_dic[name] for name in ovl_includes]
 
 		self.aux_entries["file_index"] = [loader.file_index for aux_suffix, loader in loaders_and_aux]
 		self.aux_entries["basename"] = [self.names.offset_dic[name] for name in aux_suffices]
+		# Flush first. get_aux_size stats the file on disk, and flush_to_aux above may
+		# still be holding an open buffered writer, so the stat can land mid-flush and
+		# report a block-aligned prefix of the real size. Measured on PC2
+		# FaunaSharedMaterials: the aux is 51712 bytes and byte-identical afterwards, yet
+		# the header recorded 50176 (98 * 512, i.e. a partial flush). The comment in
+		# get_aux_size claims the stat is "independent of flushing the aux"; it is exactly
+		# dependent on it
+		for aux_suffix, loader in loaders_and_aux:
+			handle = loader.aux_handles.get(aux_suffix)
+			if handle is not None and not handle.closed and handle.writable():
+				handle.flush()
 		self.aux_entries["size"] = [loader.get_aux_size(aux_suffix) for aux_suffix, loader in loaders_and_aux]
 
 		if update_aux:
@@ -1291,12 +1746,33 @@ class OvlFile(Header):
 				archive.num_root_entries = len(loaders)
 				all_frags = set()
 				if hasattr(ovs, "uncaught_fragments") and ovs.uncaught_fragments:
-					logging.warning(f"Restoring {len(ovs.uncaught_fragments)} uncaught fragments to {archive.name}")
-					all_frags.update(ovs.uncaught_fragments)
+					# Only those still pointing at a live pool. rebuild_pools has already
+					# run and drops any pool left with no offsets, which is what happens
+					# to the pools a rewritten loader used to own. A fragment into a
+					# dropped pool cannot be expressed: resolve() below turns it into
+					# index -1 rather than failing, and two of those collapse onto the
+					# same row, so num_fragments (counted here, on pool OBJECTS) exceeds
+					# the distinct rows actually written and validate_fragments' assert
+					# fires on reload. Bard.ovl stranded 14 this way, 6 of them as
+					# (-1, 0), when its motiongraphs were rewritten
+					# Dropping is right: either whoever rewrote the pool re-registered
+					# these links, or they point at content that no longer exists
+					live = {id(pool) for pool in ovs.pools}
+					kept = {(l, s) for l, s in ovs.uncaught_fragments
+							if id(l[0]) in live and id(s[0]) in live}
+					stranded = len(ovs.uncaught_fragments) - len(kept)
+					logging.warning(f"Restoring {len(kept)} uncaught fragments to {archive.name}")
+					if stranded:
+						logging.warning(
+							f"Dropped {stranded} uncaught fragments in {archive.name} whose "
+							f"pool did not survive the rebuild")
+					all_frags.update(kept)
 				for i, loader in enumerate(loaders):
 					all_frags.update(loader.fragments)
 					loader.root_index = i
 				archive.num_fragments = len(all_frags)
+				# snapshot the order this archive was read with, before reset wipes it
+				prev_fragments = [tuple(int(v) for v in row) for row in ovs.fragments]
 				ovs.reset_field("root_entries")
 				ovs.reset_field("fragments")
 				# create lut for pool indices
@@ -1312,8 +1788,12 @@ class OvlFile(Header):
 					return pools_lut.get(pool, -1), offset
 
 				if all_frags:
-					ovs.fragments[:] = [(*resolve(p_pool, l_o), *resolve(s_pool, s_o)) for (p_pool, l_o), (s_pool, s_o) in all_frags]
-					ovs.fragments.sort(order=("link_pool", "struct_pool", "link_offset", "struct_offset"))
+					rows = [(*resolve(p_pool, l_o), *resolve(s_pool, s_o)) for (p_pool, l_o), (s_pool, s_o) in all_frags]
+					# all_frags is a set, so there is no insertion order to fall back on;
+					# the old sort is kept as the tiebreak for rows the source didn't have
+					ovs.fragments[:] = order_like_source(
+						rows, prev_fragments,
+						lambda r: (r[0], r[2], r[1], r[3]))
 				# get root entries; not all ovs have root entries - some JWE2 ovs just have data
 				if loaders:
 					root_ptrs = [loader.root_ptr for loader in loaders]
@@ -1378,8 +1858,13 @@ class OvlFile(Header):
 					f"Archive {archive.name} has {archive.num_pools} pools in {archive.num_pool_groups} pool_groups")
 
 			# update archive names
-			# archive_names = sorted([archive.name for archive in self.archives], key=lambda n: djb2(n))  # not correct
-			self.archive_names.update_strings([archive.name for archive in self.archives])
+			# retail orders this buffer independently of the archive table, so keep
+			# the order that was read instead of regenerating it from self.archives
+			archive_names = [archive.name for archive in self.archives]
+			read_order = [n for _, n in sorted(self.archive_names.offset_2_str.items()) if n]
+			if sorted(read_order) == sorted(archive_names):
+				archive_names = read_order
+			self.archive_names.update_strings(archive_names)
 			self.len_archive_names = len(self.archive_names.data)
 			# update the ovl counts
 			self.num_archives = len(self.archives)
@@ -1507,9 +1992,45 @@ class OvlFile(Header):
 						ovs_stream = streams[archive.ovs_path]
 						archive.read_start = ovs_stream.tell()
 						ovs_stream.write(compressed)
-					# size of the archive entry = 68
-					# this is true for jwe2 tylo, but not for jwe2 rex 93 and many others
-					meta.unk_0 = 68 + archive.uncompressed_size
+					# unk_0 is the archive's resident size: its size_1 buffers, its pool
+					# data, a fixed cost per root entry / data entry / pool, its set and
+					# asset tables, and a constant. Exact on every retail archive shape,
+					# so this supersedes the earlier single-pool rule (which it
+					# reproduces value for value) and the 68 + uncompressed_size fallback
+					# alongside it -- there is no longer a shape condition
+					# per_root and the constant are version-gated, both +24 at 19, the
+					# same ext_hash schema boundary the old base/per_entry moved on;
+					# per_de and per_pool are 16 at both. The set/asset term is not a
+					# constant at all, it is those arrays' own byte size, so it tracks
+					# the schema on its own (SetEntry 8 -> 12, AssetEntry 16 -> 24)
+					# Only versions 18 and 20 were ever measured, and only in the
+					# PC/PZ user_version family, so two groups ride on this untested:
+					# everything BELOW 19 takes the 32/160 branch, which is Disneyland
+					# Adventures (15) and Zoo Tycoon (17) as well as PC1; and the whole
+					# djb family at 20 (JWE 2, JWE 2 Dev, JWE 3, Warhammer) takes the
+					# 56/184 branch. Version 19 itself (JWE 1, Planet Zoo pre-1.6) has
+					# no retail data behind it either. That is the same exposure the old
+					# 288/240 code had, not new, but it is wider than "version 18 vs 20"
+					# Note use_djb explicitly "affects memory offsets" and gives the JWE
+					# family per-pool relative offsets where PC/PZ are relative to the
+					# whole pool block (see get_pool_offset) -- this sums pool.size and
+					# never reads an offset, so it should carry over, but that is
+					# reasoning, not a measurement
+					# Verified zero residual on 11986 retail archives across PC2, PC1 and
+					# PZ, every shape including empty ones (no pools and no entries gives
+					# exactly the constant). Third-party mod ovls under ACSE/, ForgeUtils/
+					# and Mod_* do NOT match, and are not counterexamples: they were
+					# written by this code, so they carry the old formula's value
+					ovs = archive.content
+					set_header = ovs.set_header
+					per_root = 56 if self.version >= 19 else 32
+					meta.unk_0 = (sum(int(d.size_1) for d in ovs.data_entries)
+								  + sum(int(p.size) for p in ovs.pools)
+								  + per_root * len(ovs.root_entries)
+								  + 16 * len(ovs.data_entries)
+								  + 16 * len(ovs.pools)
+								  + set_header.sets.nbytes + set_header.assets.nbytes
+								  + (184 if self.version >= 19 else 160))
 					# this is fairly good, doesn't work for tylo static but all others, all of jwe2 rex 93, JWE parrot, pz fallow deer
 					meta.unk_1 = sum([data.size_2 for data in archive.content.data_entries])
 				# write ovl + static

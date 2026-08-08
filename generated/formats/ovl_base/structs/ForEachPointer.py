@@ -31,6 +31,11 @@ class ForEachPointer(Pointer):
 	def _get_filtered_attribute_list(cls, instance, include_abstract=True):
 		yield from super()._get_filtered_attribute_list(instance, include_abstract)
 
+	# A foreach array whose every element writes zero bytes has nothing to point
+	# at, and retail leaves the pointer null rather than shipping an empty one
+	# See Pointer.write_ptr for why this is not the default for pointers at large
+	SKIP_EMPTY_TARGET = True
+
 	def read_template(self, stream):
 		if self.template:
 			if isinstance(self.arg, ArrayPointer):
@@ -49,9 +54,11 @@ class ForEachPointer(Pointer):
 
 	@classmethod
 	def _from_xml(cls, instance, elem):
-		instance.data = Array(instance.context, instance.arg.data, None, (len(elem)), instance.template, set_default=False)
+		# a zero element array is a nullptr on the XML path, so foreach nothing
+		arg_data = instance.arg.data if instance.arg.data is not None else ()
+		instance.data = Array(instance.context, arg_data, None, (len(elem)), instance.template, set_default=False)
 		# need set_default to fix dtype according to each member of arg's input array
-		instance.data[:] = [instance.template(instance.context, member, instance.template, set_default=True) for member in instance.arg.data]
+		instance.data[:] = [instance.template(instance.context, member, instance.template, set_default=True) for member in arg_data]
 		for subelem, member in zip(elem, instance.data):
 			member._from_xml(member, subelem)
 		return instance

@@ -34,12 +34,45 @@ class ArrayPointer(Pointer):
 		# check if the pointer holds data
 		sub = elem.find(f'./{prop}')
 		if sub is None:
+			# An ABSENT array element must be a NULLPTR, not an empty array
+			# _from_xml(instance, ()) builds a zero-length Array, which is not
+			# None, so has_data is True, so write_ptr writes zero bytes, sets
+			# target_offset = None and STILL attaches a fragment: a relocation
+			# pointing at the end of the pool where retail has none at all
+			# The asymmetry is real - a pointer that DID have a link reads back
+			# as a present (possibly empty) element and must keep its dangling
+			# relocation; one that had NO link emits no element and must stay a
+			# nullptr. Conflating them inflates dangling fragment counts
 			if arg:
 				logging.warning(f"Missing array '{prop}' on XML element '{elem.tag}' for count {arg}")
-			cls._from_xml(instance, ())
-		else:
-			cls._from_xml(instance, sub)
+			instance.data = None
+			return instance
+		raw = sub.get("raw")
+		if raw is not None:
+			# A null pointer carrying non-zero raw words (see Pointer.to_xml's
+			# not-has_data branch, which ArrayPointer inherits since it does not
+			# override to_xml). Pointer.from_xml already treats this as a
+			# nullptr; ArrayPointer.from_xml did not, so a dangling array
+			# pointer - real retail data, never resolvable - came back with
+			# has_data True. write_ptr then gave it a live relocation retail
+			# never had, and on reload the sibling count field (itself
+			# untouched leftover retail bytes, harmless while the pointer
+			# stayed null) sized a real array read: the count-corruption hang
+			instance.data = None
+			pi, off = raw.split(",")
+			instance.pool_index, instance.data_offset = int(pi), int(off)
+			return instance
+		ref = sub.get("ref")
+		if ref is not None:
+			# a reference to a shared target defined elsewhere (see Pointer.to_xml)
 			cls.pool_type_from_xml(sub, instance)
+			instance.data = None
+			instance.alias_ref = ref
+			return instance
+		cls._from_xml(instance, sub)
+		cls.pool_type_from_xml(sub, instance)
+		if sub.get("id") is not None:
+			instance.share_id = sub.get("id")
 		return instance
 
 	@classmethod

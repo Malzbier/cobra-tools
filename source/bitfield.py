@@ -71,7 +71,11 @@ class BasicBitfield(object, metaclass=BitfieldMetaClass):
 
     @classmethod
     def from_xml(cls, target, elem, prop, arg=0, template=None):
-        return cls.from_value(int(elem.attib[prop], 0))
+        # NB: this read elem.attib - a typo - so EVERY bitfield loaded from XML
+        # raised AttributeError. create() catches and logs per-file errors, so
+        # the only symptom was the file coming back silently incomplete rather
+        # than an obvious failure
+        return cls.from_value(int(elem.attrib[prop], 0))
 
     @staticmethod
     def to_xml(elem, prop, instance, arg, template, debug):

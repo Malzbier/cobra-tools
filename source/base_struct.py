@@ -223,11 +223,32 @@ class BaseStruct(metaclass=StructMetaClass):
                 # copy version to context
                 if "version" in f_name:
                     setattr(instance.context, f_name, getattr(instance, f_name))
-            except:
-                # logging.warning(f"Failed reading '{cls.__name__}.{f_name}' at {stream.tell()}")
-                # # stop reading this struct
-                # break
-                raise BufferError(f"Failed reading '{cls.__name__}.{f_name}' at {stream.tell()}")
+            except Exception as ex:
+                # A blanket "warn and keep going on any failure" was tried
+                # before (7c4c0b3fd) and reverted (1522dbbd3) - too broad,
+                # it would mask genuine corruption anywhere as readily as it
+                # tolerates a benign truncation. This is deliberately much
+                # narrower: only when the stream has GENUINELY run out of
+                # bytes entirely (pos == true end), not merely "this read
+                # failed". Measured cause: retail sometimes allocates a pool
+                # a few bytes short of what its own LAST struct's LAST field
+                # needs - confirmed on PZ animal motiongraphs
+                # (RandomAnimationActivityData's trailing pointer truncated
+                # by exactly 8 bytes in one build, while byte-for-byte
+                # IDENTICAL shared-template data reads cleanly with room to
+                # spare in every other build sharing that same data - so this
+                # is retail's own pool padding varying, not a missing schema
+                # field). Any other failure - wrong bytes mid-stream, a
+                # genuinely malformed file - still raises exactly as before
+                pos = stream.tell()
+                stream.seek(0, 2)
+                stream_end = stream.tell()
+                stream.seek(pos)
+                if pos >= stream_end:
+                    logging.warning(f"{cls.__name__}.{f_name} at {pos}: stream exhausted "
+                                     f"(retail's own pool ends here) - remaining fields keep their defaults")
+                    break
+                raise BufferError(f"Failed reading '{cls.__name__}.{f_name}' at {pos}") from ex
 
     @classmethod
     def write_fields(cls, stream, instance):

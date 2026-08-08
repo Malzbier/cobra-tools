@@ -74,10 +74,11 @@ class FgmLoader(MemStructLoader):
 						member._name_offset = names_writer.tell()
 						ZString.to_stream(member.name, names_writer, self.header.context)
 
-			for i, tex in enumerate([t for t in self.header.textures.data if t.dtype == FgmDtype.TEXTURE]):
+			# textures/attributes are a nullptr when the shader declares none
+			for i, tex in enumerate([t for t in self.header.textures.data or () if t.dtype == FgmDtype.TEXTURE]):
 				tex.value[0]._tex_index = i
 			value_offset = 0
-			for attrib in self.header.attributes.data:
+			for attrib in self.header.attributes.data or ():
 				attrib._value_offset = value_offset
 				value_offset += attrib_sizes[attrib.dtype]
 			return names_writer.getvalue()

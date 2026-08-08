@@ -80,6 +80,66 @@ class MemPool(BaseStruct):
 		self.offsets = set()
 		self.link_offsets = None
 		self.debug_dump = None
+		# leading bytes nothing pointed at when this pool was read
+		self.prefix = 0
+		# retail stores each distinct string once, so intern them on write
+		self.write_str_cache = {}
+
+	# align_write's coarsest alignment, so a moved block keeps its residue
+	ALIGNMENT = 16
+
+	def compact(self):
+		"""Drop bytes no live struct covers, returning {old ptr: new ptr}.
+
+		Rewriting an entry drops its old blocks from self.offsets but leaves the
+		bytes behind, so reclaim them here. Only self.prefix is kept: 9 of 1166
+		retail pools have leading bytes nothing points at, but measuring against
+		the CURRENT first block instead would spare a whole orphaned copy in
+		every pool the rewrite replaced outright.
+
+		The remap covers link offsets as well as block starts, because fragments
+		and dependencies point INSIDE a block, not at its start.
+		"""
+		live = sorted(self.offsets)
+		if not live:
+			return {}
+		data = self.data.getvalue()
+		out = bytearray(data[:min(self.prefix, live[0])])
+		links = sorted(self.offset_2_link.items())
+		new_links = {}
+		size_map = {}
+		remap = {}
+		i = 0
+		for offset in live:
+			size = self.size_map[offset]
+			# only whole ALIGNMENT steps are reclaimed, so the block stays aligned
+			out.extend(b"\x00" * ((offset - len(out)) % self.ALIGNMENT))
+			new_offset = len(out)
+			out.extend(data[offset: offset + size])
+			size_map[new_offset] = size
+			if new_offset != offset:
+				remap[(self, offset)] = (self, new_offset)
+			# link offsets travel with the block they sit in, the rest are gone
+			while i < len(links) and links[i][0] < offset:
+				i += 1
+			while i < len(links) and links[i][0] < offset + size:
+				l_offset, entry = links[i]
+				new_links[l_offset - offset + new_offset] = entry
+				if new_offset != offset:
+					remap[(self, l_offset)] = (self, l_offset - offset + new_offset)
+				i += 1
+		if not remap and len(out) == len(data):
+			return {}
+		logging.debug(f"Compacted pool {self.i} from {len(data)} to {len(out)} bytes")
+		self.data.seek(0)
+		self.data.write(out)
+		self.data.truncate()
+		self.prefix = min(self.prefix, live[0])
+		self.offsets = set(size_map)
+		self.size_map = size_map
+		self.offset_2_link = new_links
+		self.link_offsets = np.array(list(new_links.keys()))
+		return remap
 
 	def get_ptrs_in_struct(self, p_offset, p_size):
 		"""find all link offsets that are within the parent struct using a boolean mask"""
@@ -106,6 +166,7 @@ class MemPool(BaseStruct):
 		self.size_map = {}
 		# sort them
 		sorted_offsets = sorted(self.offsets)
+		self.prefix = sorted_offsets[0] if sorted_offsets else 0
 		# add the end of the header data block
 		sorted_offsets.append(self.size)
 		# get the size of each pointer
@@ -153,7 +214,21 @@ class MemPool(BaseStruct):
 		self.data.seek(0, 2)
 		return self.data.tell()
 
-	def pad(self, alignment=4):
+	def pad(self, alignment=8):
+		"""Pad the pool to `alignment`.
+
+		Retail pools are 8-byte aligned, not 4: a survey of 60 shipped PC2 OVLs
+		found 53 exactly 8-aligned and none 2- or 4-aligned. rebuild_pools is the
+		only caller and passes no argument, so any pool whose payload was 1..4
+		mod 8 came out exactly 4 bytes short. calc_size_map sizes each struct as
+		"offset of the next pointer minus this offset", which folds the pool tail
+		into the LAST struct -- so the symptom presented as "the final ZString
+		lost 4 NULs" rather than as a pool-level problem.
+
+		Measured on .sceneryanimchoices round-trip: alignment 4 -> 23/50 files
+		byte-exact, 8 -> 50/50, 16 -> 22/50. So it is 8 specifically, not simply
+		"more is better".
+		"""
 		size = self.get_size()
 		padding_bytes = get_padding(size, alignment)
 		logging.debug(f"Padded pool of ({size} bytes) with {len(padding_bytes)}, alignment = {alignment}")

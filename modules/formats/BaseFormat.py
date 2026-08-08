@@ -12,6 +12,7 @@ from generated.formats.ovl import UNK_HASH, is_jwe2, is_pz, is_pz16
 from generated.formats.ovl.structs.BufferEntry import BufferEntry
 from generated.formats.ovl.structs.MemPool import MemPool
 from generated.formats.ovl.structs.DataEntry import DataEntry
+from generated.formats.ovl_base.structs.Pointer import drain_pending_aliases
 from modules.formats.shared import djb2, hex_dump, splitext_safe
 
 TAB = '  '
@@ -24,6 +25,15 @@ class BaseFile:
 	temp_extensions = ()
 	can_extract = True
 	target_class: None
+	# May write_ptr point every referrer of an equal-valued string at one shared
+	# block? True for formats whose reader does not track which block a string
+	# came from - there, value-interning is the only way to reproduce retail's
+	# sharing (measured on .datastreams: 66 changed entries -> 1). Formats whose
+	# reader DOES record block identity (context.recursion plus the id/ref alias
+	# machinery) set this False: their sharing is reproduced from that identity,
+	# and retail ships equal-valued strings as separate blocks that value-merging
+	# would collapse
+	INTERN_STRINGS = True
 
 	def __init__(self, ovl, file_name, mime_version):
 		self.ovl = ovl
@@ -227,6 +237,18 @@ class BaseFile:
 		self.stack[(s_pool, s_offset)] = {}
 		self.fragments.add(((l_pool, l_offset), (s_pool, s_offset)))
 
+	def remap_ptrs(self, remap):
+		"""Repoint this loader at the blocks that pool compaction moved"""
+		self.root_ptr = remap.get(self.root_ptr, self.root_ptr)
+		self.stack = {
+			remap.get(ptr, ptr): {
+				rel: remap.get(entry, entry) if isinstance(entry, tuple) else entry
+				for rel, entry in children.items()}
+			for ptr, children in self.stack.items()}
+		self.fragments = {
+			(remap.get(link, link), remap.get(struct, struct)) for link, struct in self.fragments}
+		self.dependencies = [(name, remap.get(ptr, ptr)) for name, ptr in self.dependencies]
+
 	def get_pool(self, pool_type_key):
 		assert pool_type_key is not None
 		# get one directly editable pool, if it exists
@@ -425,6 +447,200 @@ class BaseFile:
 			ovs = self.ovl.create_archive(ovs_name)
 			ovs.data_entries.append(data_entry)
 			ovs.buffer_entries.extend(data_entry.buffers)
+
+	def raw_export(self):
+		"""Capture this loader's blocks and relocations WITHOUT consulting the struct model.
+
+		The model-driven path (collect -> to_xml -> create -> write_ptrs) can only carry
+		what it can parse, and for .motiongraph that is 4131 of 5526 relocations: a
+		quarter of the file has no Pointer instance anywhere in the model, so a re-save
+		regenerates 3453 and destroys the rest.
+
+		The read side has no such limit. track_ptrs/check_for_ptrs already enumerates
+		every relocation straight from the pool link tables, which is where the 5526 comes
+		from. This exposes that same information in a form an external, game-specific tool
+		can produce and consume, so packaging a format cobra-tools cannot parse stops
+		depending on cobra-tools learning to parse it.
+
+		The pointer VALUES in the block bytes are not meaningful - an OVL stores its
+		relocations in the fragment table, and load rebuilds offset_2_link from there - so
+		the bytes travel verbatim and only the table needs translating.
+
+		Returns plain data: ints, bytes and tuples, no cobra objects, so it serialises to
+		anything. Offsets are block-relative, never absolute, because pools are shared
+		with other loaders and a pool offset means nothing once the file is rebuilt.
+		"""
+		# stable block order, so two exports of the same loader compare equal
+		blocks = sorted(self.stack.keys(), key=lambda po: (po[0].i, po[1]))
+		index_of = {(pool, off): i for i, (pool, off) in enumerate(blocks)}
+
+		def locate(pool, offset):
+			"""Absolute pool position -> (block index, offset within block).
+
+			A fragment may point INSIDE a block rather than at its start (the same
+			reason MemPool.compact remaps link offsets separately), so the containing
+			block is found by range, not by dict lookup.
+			"""
+			hit = index_of.get((pool, offset))
+			if hit is not None:
+				return hit, 0
+			for i, (p, o) in enumerate(blocks):
+				if p is pool and o <= offset < o + pool.size_map.get(o, 0):
+					return i, offset - o
+			return None, offset
+
+		out_blocks = []
+		data_cache = {}
+		for pool, off in blocks:
+			buf = data_cache.get(id(pool))
+			if buf is None:
+				buf = data_cache[id(pool)] = pool.data.getvalue()
+			size = pool.size_map.get(off, 0)
+			out_blocks.append({"pool_type": int(pool.type), "size": int(size),
+							   "data": bytes(buf[off: off + size])})
+
+		# first block this loader owns in each pool, used to name a pool without
+		# depending on pool indices, which the rebuild reassigns
+		pool_anchor = {}
+		for i, (pool, off) in enumerate(blocks):
+			pool_anchor.setdefault(id(pool), i)
+
+		relocs, deps, unresolved = [], [], 0
+		# Walk the LINK TABLE of every block this loader owns, rather than self.fragments
+		# self.fragments is what check_for_ptrs reached from the root, which misses links
+		# that sit inside these very blocks but no loader claims (load reports them as
+		# "Could not map N fragments"). Rewriting a block without them strands those links
+		# in a pool that then empties, gets dropped, and resolves to index -1
+		# Dependencies come out of the same walk - they are just links whose entry is a
+		# name rather than a pool position
+		for pool, off in blocks:
+			size = pool.size_map.get(off, 0)
+			src_i = index_of[(pool, off)]
+			for l_offset, src_rel, entry in pool.get_ptrs_in_struct(off, size):
+				if isinstance(entry, str):
+					# points at another FILE by name, not into a pool
+					deps.append((src_i, int(src_rel), entry))
+					continue
+				s_pool, s_offset = entry
+				if s_offset is None:
+					# An "empty pointer": the target is the END of a pool, which retail
+					# genuinely ships and load_pointers records as None. It has no block
+					# of its own, so it is recorded as "the pool that block N lives in"
+					#
+					# Deliberately an anchor block rather than a pool TYPE. Resolving by
+					# type on import calls get_pool, which can return a fresh pool that
+					# then receives no blocks, gets dropped by rebuild_pools as empty,
+					# and leaves the fragment at pool index -1
+					anchor = pool_anchor.get(id(s_pool))
+					if anchor is None:
+						unresolved += 1
+						continue
+					relocs.append((src_i, int(src_rel), None, anchor))
+					continue
+				dst_i, dst_rel = locate(s_pool, s_offset)
+				if dst_i is None:
+					unresolved += 1
+					continue
+				relocs.append((src_i, int(src_rel), dst_i, int(dst_rel)))
+
+		root_i, root_rel = locate(*self.root_ptr) if self.root_ptr[0] else (None, 0)
+		if unresolved:
+			logging.warning(f"{self.name}: {unresolved} relocations fall outside this "
+							f"loader's blocks and were not exported")
+		return {"name": self.name, "ext": self.ext, "version": int(self.mime_version),
+				"pool_type": self.pool_type,
+				# assigned by OvlFile.load from the file table, not by init_loader, so a
+				# loader rebuilt from an export alone has neither unless they travel here
+				"set_pool_type": getattr(self, "set_pool_type", None),
+				"ovs_name": self.ovs_name,
+				"root_block": root_i, "blocks": out_blocks, "relocations": relocs,
+				"dependencies": deps}
+
+	def raw_import(self, exported):
+		"""Write blocks and relocations back, WITHOUT going through the struct model.
+
+		Counterpart to raw_export. Lays each block out with align_write, then registers
+		every relocation directly against the fragment table, so a relocation survives
+		whether or not any Pointer models it.
+
+		Deliberately does not touch self.header: nothing here is parsed, so there is no
+		model to populate, and a later collect() will build one from the written bytes if
+		the format is modelled at all.
+		"""
+		# get_pool reads self.ovs, which only set_ovs assigns. A loader built fresh from
+		# an export has none, so resolve it here rather than making every caller do it -
+		# the point of this path is that an export is sufficient on its own
+		if self.ovs is None:
+			self.set_ovs(exported.get("ovs_name") or "STATIC")
+		# getattr, not `is None`: neither is an attribute on a freshly built loader at
+		# all, they are assigned by OvlFile.load from the file table
+		if getattr(self, "pool_type", None) is None:
+			self.pool_type = exported.get("pool_type")
+		if getattr(self, "set_pool_type", None) is None:
+			self.set_pool_type = exported.get("set_pool_type")
+
+		placed = []
+		for blk in exported["blocks"]:
+			pool = self.get_pool(blk["pool_type"])
+			data = blk["data"]
+			stream, offset = pool.align_write(data)
+			stream.write(data)
+			pool.offsets.add(offset)
+			pool.size_map[offset] = len(data)
+			self.stack[(pool, offset)] = {}
+			placed.append((pool, offset))
+
+		root_i = exported.get("root_block")
+		if root_i is not None:
+			r_pool, r_off = placed[root_i]
+			self.root_ptr = (r_pool, r_off + 0)
+
+		for src_i, src_rel, dst_i, dst_rel in exported["relocations"]:
+			s_pool, s_base = placed[src_i]
+			l_offset = s_base + src_rel
+			if dst_i is None:
+				# empty pointer: target is the end of the pool holding the anchor block
+				# Registered with offset None exactly as load_pointers stores it, and
+				# NOT given a stack entry - check_for_ptrs does not recurse into these
+				# either, and inventing a block at None would corrupt the size map
+				t_pool = placed[dst_rel][0]
+				s_pool.offset_2_link[l_offset] = (t_pool, None)
+				self.fragments.add(((s_pool, l_offset), (t_pool, None)))
+				self.stack[(s_pool, s_base)][src_rel] = (t_pool, None)
+				continue
+			t_pool, t_base = placed[dst_i]
+			t_offset = t_base + dst_rel
+			s_pool.offset_2_link[l_offset] = (t_pool, t_offset)
+			self.fragments.add(((s_pool, l_offset), (t_pool, t_offset)))
+			self.stack[(s_pool, s_base)][src_rel] = (t_pool, t_offset)
+
+		for src_i, src_rel, name in exported.get("dependencies", ()):
+			s_pool, s_base = placed[src_i]
+			l_offset = s_base + src_rel
+			s_pool.offset_2_link[l_offset] = name
+			self.dependencies.append((name, (s_pool, l_offset)))
+			self.stack[(s_pool, s_base)][src_rel] = name
+
+	def raw_extract(self, file_path):
+		"""Write this loader's blocks and relocations to a self-contained pack file."""
+		from modules.formats import raw_pack
+		data = raw_pack.pack(self.raw_export())
+		with open(file_path, "wb") as f:
+			f.write(data)
+		logging.info(f"Wrote raw pack for {self.name} ({len(data)} bytes)")
+		return file_path
+
+	def raw_create(self, file_path):
+		"""Rebuild this loader from a pack file, without parsing its contents.
+
+		Counterpart to raw_extract. The pack carries pool_type, set_pool_type and
+		ovs_name, which OvlFile.load normally supplies from the file table, so a loader
+		built from a pack alone needs no donor OVL to be interpretable.
+		"""
+		from modules.formats import raw_pack
+		with open(file_path, "rb") as f:
+			exported = raw_pack.unpack(f.read())
+		self.raw_import(exported)
 
 	def remove(self):
 		logging.info(f"Removing {self.name}")
@@ -650,7 +866,35 @@ class BaseFile:
 		self.root_ptr = (pool, offset)
 		self.stack[self.root_ptr] = {}
 		self.target_class.to_stream(self.header, stream, self.context)
+		self.write_root_tail(stream)
+		# per-file state for shared (DAG) pointer targets: a target is written
+		# ONCE, recorded here by its id, and every other reference to it binds to
+		# that address instead of writing a duplicate
+		self.alias_targets = {}
+		self.pending_aliases = []
+		# object-identity guard: id(ptr.data) -> (ptr.data, (target_pool, target_offset))
+		# General write-side counterpart to the above, which only fires on the XML
+		# alias path. Keeps a strong reference to the data alongside its written
+		# location, since id() values are reused once an object is garbage collected
+		self.write_registry = {}
 		self.header.write_ptrs(self, pool)
+		drain_pending_aliases(self)
+
+	def write_root_tail(self, stream):
+		"""Append anything that shares the root's BLOCK but not its STRUCT.
+
+		A root block can be larger than the struct we model - the remainder is
+		data nothing points at directly, so calc_size_map folds it into the same
+		block and a reader that stops after the struct never sees it. A format
+		that preserves such a tail writes it here, where it lands contiguously
+		after the header exactly as retail has it.
+
+		This hook exists so those formats do not have to reimplement
+		write_memory_data. MotiongraphLoader did, as nine identical lines with
+		three inserted, which meant any future change to the method above would
+		silently not reach it - no error, just a motiongraph still written the
+		old way.
+		"""
 
 
 class MemStructLoader(BaseFile):

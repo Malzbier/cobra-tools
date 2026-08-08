@@ -67,7 +67,19 @@ def class_from_struct(struct, from_value_func):
 
 		@staticmethod
 		def from_xml(target, elem, prop, arg=0, template=None):
-			return literal_eval(elem.attrib[prop])
+			val = elem.attrib[prop]
+			try:
+				return literal_eval(val)
+			except (ValueError, SyntaxError):
+				# NaN and Infinity do NOT round-trip through literal_eval: repr()
+				# writes them as bare `nan` / `inf` / `-inf`, which parse as NAMES
+				# rather than literals, so reading the file back raises
+				# "malformed node or string: <ast.Name object>"
+				# Retail data does contain them - a float field reading nan is
+				# what made two datastreamsonly graphs unreadable - and since
+				# create() only logs per-file errors, the symptom was a silently
+				# truncated file rather than a visible failure
+				return np.array(val, dtype=dtype).item()
 
 		@staticmethod
 		def _from_xml_array(instance, elem):
@@ -139,6 +151,16 @@ def r_zstr(rfunc):
 
 # @staticmethod
 def w_zstr(wfunc, val):
+	# An EMPTY <pointer /> element - which is how a null or blank ZString
+	# round-trips through XML - loads as a non-string, and .encode() then raises
+	# AttributeError. ovl.create() catches per-file errors and only logs them, so
+	# the symptom is NOT a visible crash: the write aborts partway and the file is
+	# silently incomplete in the packed OVL. In a motiongraph that means the rest
+	# of the graph is never written, its pool is left empty, and UNRELATED files
+	# sharing that pool come back with corrupted fields - e.g. every .tex in the
+	# archive losing its `texel` name, which then makes the OVL unloadable
+	if not isinstance(val, (str, bytes)):
+		val = "" if val is None or isinstance(val, int) else str(val)
 	wfunc(val.encode(errors="surrogateescape"))
 	wfunc(b'\x00')
 

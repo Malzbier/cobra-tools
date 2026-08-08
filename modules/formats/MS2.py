@@ -104,17 +104,31 @@ class Ms2Loader(MemStructLoader):
 
 		self.header = ms2_file.info
 		# fix up the pointers
-		self.header.buffer_infos.data = ms2_file.buffer_infos
-		self.header.model_infos.data = ms2_file.model_infos
 		self.header.buffer_pointers.data = ms2_file.buffer_pointers
-		buffer_infos = self.header.buffer_infos
-		for model_info in ms2_file.model_infos:
-			model_info.materials.data = model_info.model.materials
-			model_info.lods.data = model_info.model.lods
-			model_info.objects.data = model_info.model.objects
-			model_info.meshes.data = model_info.model.meshes
-			for wrapper in model_info.model.meshes:
-				wrapper.mesh.stream_info.update_target(buffer_infos)
+		# Only the newer layout keeps buffer_infos, model_infos and each model_info's
+		# four arrays as relocated pool blocks. Assigning them unconditionally gave
+		# every older-version .ms2 a set of relocations retail does not have, which is
+		# the single signature behind 651 of PC1's 873 structural CHANGED entries
+		# Surveyed on retail directly, reading each header pointer's own relocation
+		# state rather than inferring from counts:
+		#   PC1  v32  buffer_infos NO   model_infos NO   buffer_pointers YES  (1 frag total)
+		#   PZ   v50  buffer_infos YES  model_infos YES  buffer_pointers YES
+		#   PC2  v54  same as PZ
+		# so the cutoff sits between 32 and 50, and extract()'s existing `> 39` for
+		# these very fields is already inside that gap - same threshold, same fields,
+		# now applied to the OVL-internal write path too rather than only the
+		# standalone-file one
+		if self.header.version > 39:
+			self.header.buffer_infos.data = ms2_file.buffer_infos
+			self.header.model_infos.data = ms2_file.model_infos
+			buffer_infos = self.header.buffer_infos
+			for model_info in ms2_file.model_infos:
+				model_info.materials.data = model_info.model.materials
+				model_info.lods.data = model_info.model.lods
+				model_info.objects.data = model_info.model.objects
+				model_info.meshes.data = model_info.model.meshes
+				for wrapper in model_info.model.meshes:
+					wrapper.mesh.stream_info.update_target(buffer_infos)
 		# print(self.header)
 		# determine ovs names. these differ by game version and there is no real way to predict them
 		# older JWE2 versions used "HighPolyModels" exclusively
@@ -126,7 +140,10 @@ class Ms2Loader(MemStructLoader):
 			indices = range(len(ms2_file.modelstream_names))
 		ovs_lut = {n: f"Models_L{i}" for n, i in zip(ms2_file.modelstream_names, indices)}
 		# create modelstreams for buffers that have them
-		for buffer_info, buffer_presence in zip(self.header.buffer_infos.data, self.header.buffer_pointers.data):
+		# read from ms2_file, not self.header.buffer_infos.data: the latter is left
+		# unassigned on the older layout above, and this loop is about creating
+		# modelstreams either way, not about what gets relocated
+		for buffer_info, buffer_presence in zip(ms2_file.buffer_infos, self.header.buffer_pointers.data):
 			if buffer_info.name == "STATIC":
 				buffer_presence.dependency_name.pool_index = -1
 			else:
@@ -152,12 +169,15 @@ class Ms2Loader(MemStructLoader):
 
 		# write the final memstruct
 		self.write_memory_data()
-		# link some more pointers
-		pool = self.header.model_infos.target_pool
-		first_model_pool, first_model_offset = self.get_first_model_offset()
-		for model_info in self.header.model_infos.data:
-			# link first_model pointer
-			self.attach_frag_to_ptr(pool, model_info.first_model.io_start, first_model_pool, first_model_offset)
+		# link some more pointers - only meaningful where model_infos was written as
+		# a pool block at all; on the older layout there are no model_info structs in
+		# the pool, so there is nothing to point first_model at
+		if self.header.version > 39:
+			pool = self.header.model_infos.target_pool
+			first_model_pool, first_model_offset = self.get_first_model_offset()
+			for model_info in self.header.model_infos.data:
+				# link first_model pointer
+				self.attach_frag_to_ptr(pool, model_info.first_model.io_start, first_model_pool, first_model_offset)
 
 	def update(self):
 		if ovl_versions.is_pz16(self.ovl):
@@ -169,6 +189,19 @@ class Ms2Loader(MemStructLoader):
 			# make sure name_buffer is padded to 4 bytes
 			padding = get_padding(len(name_buffer_truncated), 4)
 			self.data_entry.update_data([name_buffer_truncated + padding, bone_infos, verts])
+			# Planet Zoo stores the name buffer PADDED but counts it UNPADDED in size_1,
+			# so update_data (which derives sizes from the datas it is given) overshoots
+			# by exactly the padding. Measured on Brazilian_Wandering_Spider: retail
+			# stores buffer 0 as 2100 with size_1 10802, i.e. 2098 + 8704, while deriving
+			# from the padded data gives 10804. That +2 is the whole difference on that
+			# asset, and unk_0 is wrong downstream of it by the same amount
+			# PZ ONLY, and this is not a version gate: PZ and PC2 are both version 20
+			# Surveyed retail `sum(buffer0, buffer1) - size_1` over 3-buffer data entries:
+			# PZ shows 1, 2 and 3 (the 4-byte padding range) on 18 of 25, while Planet
+			# Coaster and Planet Coaster 2 show 0 without exception. Subtracting on PC2
+			# regressed it from 51/60 to 21/60, which is how the gate was found
+			if not self.ovl.is_pc_2 and self.ovl.version >= 19:
+				self.data_entry.size_1 -= len(padding)
 	
 	def extract(self, out_dir):
 		self.get_version()

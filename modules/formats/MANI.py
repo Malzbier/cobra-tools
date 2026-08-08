@@ -78,7 +78,15 @@ class ManisLoader(MemStructLoader):
 		self.context.version = self.mime_version
 		if is_dla(self.ovl):
 			self.context.version = 256
-		self.context.mani_version = self.children[0].mime_version
+		# children comes straight from the file's own set table (map_assets),
+		# not derived from content, so an empty set here is retail's own data,
+		# not a loading-order bug - confirmed present on real Planet Zoo
+		# .manis sets (e.g. animationmotionextractedfighting on some species)
+		# mani_version has nothing to read it from in that case; ManiContext's
+		# own constructor default (260) is what every child would carry anyway
+		# were there any, so leave it rather than crash
+		if self.children:
+			self.context.mani_version = self.children[0].mime_version
 
 	def collect(self):
 		self.get_version()
