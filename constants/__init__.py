@@ -8,7 +8,7 @@ from pkgutil import iter_modules
 from importlib import import_module
 from dataclasses import dataclass
 
-dict_names = ("audio", "hashes", "mimes", "shaders", "textures", "texchannels")
+dict_names = ("audio", "hashes", "mimes", "shaders", "textures", "texchannels", "particles")
 
 # 3.10 has an issue with large dict files, regression fixed in 3.11
 ver = sys.version_info

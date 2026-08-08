@@ -70,6 +70,7 @@ type_module_name_map = {
 	'SubCurveType': 'generated.formats.motiongraph.enums.SubCurveType',
 	'CurveDataPoint': 'generated.formats.motiongraph.structs.CurveDataPoint',
 	'CurveData': 'generated.formats.motiongraph.structs.CurveData',
+	'BlendRecord': 'generated.formats.motiongraph.structs.BlendRecord',
 	'DataStreamResourceData': 'generated.formats.motiongraph.structs.DataStreamResourceData',
 	'DataStreamResourceDataList': 'generated.formats.motiongraph.structs.DataStreamResourceDataList',
 	'AnimationActivityData': 'generated.formats.motiongraph.structs.AnimationActivityData',

@@ -239,6 +239,42 @@
         <field name="Points" type="ArrayPointer" template="CurveDataPoint" arg="count" />
     </struct>
 
+    <struct name="BlendRecord" inherit="MemStruct">
+        72 bytes. The target of MRFMember1.ptr_0 when lua_method is
+        MotionGraph.BlendToState -- a blend descriptor. Blocks hold several of
+        them: 216 B (3 records) almost everywhere, 864 B (12) in HOL_Band.
+
+        Decoded by diffing the only FOUR distinct contents in the whole corpus;
+        with so few distinct values the bytes that VARY are exactly the fields.
+
+        `curve` is the one that matters and was nearly missed. It reads as two
+        zero uint32s in every graph where the blend curve is absent, which is
+        every graph in the original sample -- so it was first typed as padding.
+        In HOL_Band six of the twelve records have it populated, and typing those
+        bytes as ints left six live pointers undeclared: cobra walked past 6
+        CurveData blocks and their 6 CurveDataPoint arrays, losing exactly 12 of
+        the file's 249 blocks on every round-trip.
+
+        `tier` is 16.16 fixed point and only ever 100 / 10 / 1000.
+        <field name="zero_00" type="uint"/>
+        <field name="zero_01" type="uint"/>
+        <field name="curve" type="Pointer" template="CurveData"/>
+        <field name="zero_04" type="uint"/>
+        <field name="zero_05" type="uint"/>
+        <field name="zero_06" type="uint"/>
+        <field name="zero_07" type="uint"/>
+        <field name="blend_time" type="float"/>
+        <field name="zero_09" type="uint"/>
+        <field name="zero_10" type="uint"/>
+        <field name="zero_11" type="uint"/>
+        <field name="zero_12" type="uint"/>
+        <field name="zero_13" type="uint"/>
+        <field name="tier" type="uint"/>
+        <field name="zero_15" type="uint"/>
+        <field name="zero_16" type="uint"/>
+        <field name="zero_17" type="uint"/>
+    </struct>
+
     <struct name="DataStreamResourceData" inherit="MemStruct">
         56 bytes
         <field name="CurveType" type="uint64"/>

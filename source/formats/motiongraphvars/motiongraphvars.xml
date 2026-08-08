@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fileformat>
+<fileformat>
+
+	<xi:include href="../ovl_base/ovl_base.xml" xmlns:xi="http://www.w3.org/2001/XInclude" xpointer="xpointer(*/*)" />
+
+    <struct name="MotiongraphVarsRoot" inherit="MemStruct">
+        16 bytes. The variables a motiongraph can branch on.
+
+        NOT an enumnamer, although the loader used to say "probably same layout".
+        Both formats open with a uint64 count, so that guess read the count
+        correctly by luck and the body entirely wrong, then wrote a ZStringList
+        where a pointer array belongs. Measured before this: 9 of 70 files
+        round-tripped, and those 9 were exactly the 9 EMPTY ones - every file
+        actually declaring a variable lost a block and two fragments.
+        <field name="count" type="uint64"/>
+        <field name="vars" type="ArrayPointer" template="MotiongraphVarRef" arg="count"/>
+    </struct>
+
+    <struct name="MotiongraphVarRef" inherit="MemStruct">
+        8 bytes
+        <field name="var" type="Pointer" template="MotiongraphVarDef"/>
+    </struct>
+
+    <struct name="MotiongraphVarDef" inherit="MemStruct">
+        48 bytes
+
+        `kind` selects how the variable is driven: 0 = bool, 2 = trigger,
+        3 = enum. For an enum, `enum_name` names the .enumnamer holding the
+        member names - and it targets the SAME string as `var_name`, so the file
+        is a DAG rather than a tree and needs pointer aliasing to round-trip
+        without writing the string twice.
+        <field name="var_name" type="Pointer" template="ZString"/>
+        <field name="kind" type="uint64"/>
+        <field name="zero_16" type="uint"/>
+        <field name="one_f" type="float" default="1.0"/>
+        <field name="ten" type="uint64" default="10"/>
+        <field name="default_value" type="int" default="-1"/>
+        <field name="zero_36" type="uint"/>
+        <field name="enum_name" type="Pointer" template="ZString"/>
+    </struct>
+
+</fileformat>

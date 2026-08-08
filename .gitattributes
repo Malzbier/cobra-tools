@@ -5,9 +5,11 @@ docs/           linguist-documentation
 
 # Collapse in diffs
 generated/**            linguist-generated
-constants/**/audio.py   linguist-generated
-constants/**/hashes.py  linguist-generated
-constants/**/mimes.py   linguist-generated
+constants/**/audio.py       linguist-generated
+constants/**/hashes.py      linguist-generated
+constants/**/mimes.py       linguist-generated
+constants/**/particles.py   linguist-generated
+constants/**/*.bin          binary linguist-generated
 
 # Ensure shown in diffs
 gui/**          -linguist-generated

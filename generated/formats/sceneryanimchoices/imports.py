@@ -44,11 +44,8 @@ type_module_name_map = {
 	'NestedPointers': 'generated.formats.ovl_base.structs.NestedPointers',
 	'ZStringList': 'generated.formats.ovl_base.structs.ZStringList',
 	'ByteColor': 'generated.formats.ovl_base.structs.ByteColor',
-	'DataStreamsRoot': 'generated.formats.datastreams.structs.DataStreamsRoot',
-	'DataStreamsSettings': 'generated.formats.datastreams.structs.DataStreamsSettings',
-	'DataStreamsSettingsPC2': 'generated.formats.datastreams.structs.DataStreamsSettingsPC2',
-	'SubCurveType': 'generated.formats.datastreams.enums.SubCurveType',
-	'CurveDataPoint': 'generated.formats.datastreams.structs.CurveDataPoint',
+	'SceneryAnimChoicesRoot': 'generated.formats.sceneryanimchoices.structs.SceneryAnimChoicesRoot',
+	'AnimChoice': 'generated.formats.sceneryanimchoices.structs.AnimChoice',
 }
 
 name_type_map = {}

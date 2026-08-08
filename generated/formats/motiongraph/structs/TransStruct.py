@@ -1,3 +1,6 @@
+from generated.formats.ovl_base.structs.MemStruct import MemStruct
+from generated.formats.motiongraph.imports import name_type_map
+
 from generated.formats.motiongraph.imports import name_type_map
 from generated.formats.ovl_base.structs.MemStruct import MemStruct
 
@@ -29,3 +32,18 @@ class TransStruct(MemStruct):
 		yield from super()._get_filtered_attribute_list(instance, include_abstract)
 		yield 'another_mrf_reference_2', name_type_map['Pointer'], (0, None), (False, None)
 		yield 'states', name_type_map['StateArray'], (0, None), (False, None)
+
+	def get_ptr_template(self, prop):
+		"""`another_mrf_reference_2` targets an ARRAY OF MRFMember2.
+
+		It was previously left untyped, which preserves the bytes but drops every
+		relocation inside them -- so each element's `curve` pointer and the
+		CurveData -> CurveDataPoint chain behind it were lost.
+
+		Sizing it from a single asset does not generalise: across the corpus the
+		targets are 144 / 216 / 648 / 936 bytes, i.e. 2, 3, 9 and 13 times
+		MRFMember2's 72, and the larger ones DO carry relocations.
+		"""
+		if prop == "another_mrf_reference_2":
+			return name_type_map["MRFMember2"]
+

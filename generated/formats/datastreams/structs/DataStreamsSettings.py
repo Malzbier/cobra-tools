@@ -5,7 +5,7 @@ from generated.formats.ovl_base.structs.MemStruct import MemStruct
 class DataStreamsSettings(MemStruct):
 
 	"""
-	JWE1 48 bytes
+	JWE1 48 bytes - three pointers. UNVERIFIED for PC2; see DataStreamsSettingsPC2.
 	"""
 
 	__name__ = 'DataStreamsSettings'

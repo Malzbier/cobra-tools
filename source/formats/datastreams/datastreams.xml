@@ -7,15 +7,44 @@
     <struct name="DataStreamsRoot" inherit="MemStruct">
         JWE1 16 bytes
         <field name="count" type="uint64" />
-        <field name="layer_list"  type="ArrayPointer" template="DataStreamsSettings" arg="count"/>
+        <!-- template deliberately omitted: the element struct DIFFERS BETWEEN GAMES,
+             so DataStreamsRoot.get_ptr_template picks it. MemStruct.read_ptrs only
+             consults that hook when the XML template is empty. -->
+        <field name="layer_list"  type="ArrayPointer" arg="count"/>
     </struct>
 
     <struct name="DataStreamsSettings" inherit="MemStruct">
-        JWE1 48 bytes
+        JWE1 48 bytes - three pointers. UNVERIFIED for PC2; see DataStreamsSettingsPC2.
         <field name="name_a"  type="Pointer" template="ZString"/>
         <field name="name_b"  type="Pointer" template="ZString"/>
         <field name="z0" type="uint64" />
         <field name="z1" type="uint64" />
+        <field name="count" type="uint64" />
+        <field name="data"  type="ArrayPointer" template="CurveDataPoint" arg="count"/>
+    </struct>
+
+    <struct name="DataStreamsSettingsPC2" inherit="MemStruct">
+        PC2 56 bytes - FOUR pointers, measured not guessed.
+
+        Reading PC2 with the 48-byte JWE1 layout desyncs after the first entry: each
+        later entry starts 8 bytes early, so the same string turns up as name_a of one
+        entry and name_b of the next, and curve data decodes to nonsense such as
+        x=7.18e+22 with sub_curve_type=24931.
+
+        Evidence for 56:
+          * block size fits align16(56*count) for all 74 PC2 .datastreams entries
+          * relocation offsets modulo 56 are SHARP at +8/+16/+32/+48, with counts
+            exactly equal to the entry count; modulo 48 they smear over six residues
+          * decoding at 56 yields coherent events, e.g. SF_LaserScanner gives
+            LaserScanner_Scan_stop / AudioEvent / Arm_Close with a sane 3-point curve
+
+        Same shape as the motiongraph's DataStreamResourceData - name, type, placement,
+        curve - which is why the Type and Location vocabularies match it.
+        <field name="z_0" type="uint64" />
+        <field name="ds_name"  type="Pointer" template="ZString"/>
+        <field name="type"  type="Pointer" template="ZString"/>
+        <field name="z_1" type="uint64" />
+        <field name="location"  type="Pointer" template="ZString"/>
         <field name="count" type="uint64" />
         <field name="data"  type="ArrayPointer" template="CurveDataPoint" arg="count"/>
     </struct>

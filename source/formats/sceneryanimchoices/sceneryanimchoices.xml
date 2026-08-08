@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fileformat>
+<fileformat>
+
+	<xi:include href="../ovl_base/ovl_base.xml" xmlns:xi="http://www.w3.org/2001/XInclude" xpointer="xpointer(*/*)" />
+
+    <struct name="SceneryAnimChoicesRoot" inherit="MemStruct">
+        16 bytes. The dropdown of animations offered on an animated scenery part.
+        <field name="choices" type="ArrayPointer" template="AnimChoice" arg="count"/>
+        <field name="count" type="uint" />
+        <field name="pad" type="uint" />
+    </struct>
+
+    <struct name="AnimChoice" inherit="MemStruct">
+        16 bytes
+
+        The label pointer targets the loc SYMBOL the dropdown displays, e.g.
+        '[InfoPanel_AnimationType_MyProp_Default]'. The sibling
+        *_loopanimselection.enumnamer holds the INTERNAL names instead
+        (Default / Static / Idle / Sing).
+
+        `index` is the value stored in a placed prop's save data, so the order of
+        these entries is APPEND-ONLY for anyone authoring a part: inserting or
+        reordering changes what already-placed props play.
+
+        NOTE the field is called `label`, not `name`. BaseStruct's serialiser has
+        SKIPS = ("_context", "arg", "name", "io_start", "io_size", "template"),
+        so a field literally named `name` is silently dropped in BOTH directions.
+        <field name="label" type="Pointer" template="ZString"/>
+        <field name="index" type="uint" />
+        <field name="duration" type="float" />
+    </struct>
+
+</fileformat>
