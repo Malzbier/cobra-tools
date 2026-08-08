@@ -2,7 +2,8 @@ import bpy.utils.previews
 from bpy.props import StringProperty, BoolProperty
 from bpy_extras.io_utils import ExportHelper
 
-from plugin import export_ms2, export_spl, export_manis, export_banis, export_fgm
+from plugin import export_ms2, export_spl, export_manis, export_banis, export_fgm, \
+    export_animspec
 from plugin.utils.operators import BaseOp
 
 
@@ -84,3 +85,24 @@ class ExportBanis(ExportOp):
     filename_ext = ".banis"
     target = export_banis.save
     filter_glob: StringProperty(default="*.banis", options={'HIDDEN'})
+
+
+class ExportAnimSpec(ExportOp):
+    """Export the animation choice spec for animated scenery (.animspec.json)"""
+    bl_idname = "export_scene.cobra_animspec"
+    bl_label = 'Export Animation Spec'
+    # double-suffixed on purpose: the spec sits NEXT to other json in an art
+    # folder, and the build tooling discovers it by the self-identifying name
+    # <asset>.animspec.json. A double extension is just a filename to every
+    # consumer (ExportHelper appends/checks it as a plain suffix)
+    filename_ext = ".animspec.json"
+    target = export_animspec.save
+    filter_glob: StringProperty(default="*.animspec.json", options={'HIDDEN'})
+
+    def invoke(self, context, _event):
+        if not self.filepath:
+            # default alongside the .blend, matching how the other exporters seed a
+            # name; the dialog still lets the user put it anywhere
+            self.filepath = "anim_choices" + self.filename_ext
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}

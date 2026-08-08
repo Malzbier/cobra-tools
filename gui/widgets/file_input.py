@@ -287,6 +287,10 @@ class DirWidget(FileDirWidget):
 	def __init__(self, parent: QWidget, cfg: 'Config', cfg_key: str = "DIR", ask_user: bool = True) -> None:
 		super().__init__(parent=parent, cfg=cfg, cfg_key=cfg_key, ask_user=ask_user)
 
+	def reload(self) -> None:
+		if self.filepath:
+			self.open_dir(self.filepath)
+
 	def open_dir(self, dirpath: str) -> None:
 		if not self.accept_dir(dirpath):
 			logging.warning(f"{dirpath} could not be opened as a directory.")

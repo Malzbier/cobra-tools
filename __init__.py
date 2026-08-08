@@ -68,6 +68,7 @@ if bpy_available:
         from .plugin.utils.panels import *
         from .plugin.mods.properties import *
         from .plugin.mods.panels import *
+        from .plugin.mods.operators import *
 
         # 4.1 drag and drop
         if hasattr(bpy.types, 'FileHandler'):
@@ -153,6 +154,7 @@ if bpy_available:
             self.layout.operator(ExportSPL.bl_idname, text="Cobra Spline (.spl)", icon_value=icon)
             self.layout.operator(ExportBanis.bl_idname, text="Cobra Baked Anim (.banis)", icon_value=icon)
             self.layout.operator(ExportManis.bl_idname, text="Cobra Anim (.manis)", icon_value=icon)
+            self.layout.operator(ExportAnimSpec.bl_idname, text="Cobra Animation Spec (.json)", icon_value=icon)
 
 
         def menu_func_import(self, context):
@@ -256,7 +258,21 @@ if bpy_available:
             COBRA_UL_matcol_slot,
             COBRA_MOD_PT_mod,
             COBRA_MOD_PT_scenery,
+            COBRA_MOD_PT_scenery_animation,
+            COBRA_MOD_PT_scenery_effects,
+            COBRA_OT_anim_choice_add,
+            COBRA_OT_anim_choice_remove,
+            COBRA_OT_anim_event_add,
+            COBRA_OT_anim_event_remove,
+            COBRA_UL_anim_choice,
+            COBRA_UL_anim_events,
             ModData,
+            SearchNameItem,
+            # AnimEventItem MUST register before AnimChoiceItem, which holds a
+            # CollectionProperty of it; AnimChoiceItem MUST register before
+            # SceneryData, which holds a CollectionProperty of IT
+            AnimEventItem,
+            AnimChoiceItem,
             SceneryData,
             CobraCollisionSettings,
             CobraMaterialSettings,
@@ -270,6 +286,7 @@ if bpy_available:
             ExportFgm,
             ExportMS2,
             ExportManis,
+            ExportAnimSpec,
             ExportSPL,
             ExtrudeFins,
             GenerateRigEdit,
@@ -325,6 +342,12 @@ def register():
     # mod properties
     bpy.types.Collection.mod = PointerProperty(type=ModData)
     bpy.types.Object.scenery = PointerProperty(type=SceneryData)
+    # prop_search sources for the Effects panel's audio event and VFX child
+    # fields - real RNA collections, populated lazily by ensure_audio_names
+    # and ensure_child_names (plugin/mods/properties.py)
+    bpy.types.WindowManager.cobra_audio_names = CollectionProperty(type=SearchNameItem)
+    bpy.types.WindowManager.cobra_child_names = CollectionProperty(type=SearchNameItem)
+    bpy.types.WindowManager.cobra_particle_names = CollectionProperty(type=SearchNameItem)
     # Injection of elements in the contextual menu of the File Browser editor
     bpy.types.FILEBROWSER_MT_context_menu.append(CT_FileBrowser_Context_Menu)
     bpy.types.PHYSICS_PT_rigid_body_constraint_limits_angular.append(draw_rigid_body_constraints_cobra)
@@ -354,6 +377,9 @@ def unregister():
     del bpy.types.Material.matcol_layers_current
     del bpy.types.Scene.cobra
     del bpy.types.Mesh.cobra
+    del bpy.types.WindowManager.cobra_audio_names
+    del bpy.types.WindowManager.cobra_child_names
+    del bpy.types.WindowManager.cobra_particle_names
     global preview_collection
     bpy.utils.previews.remove(preview_collection)
 

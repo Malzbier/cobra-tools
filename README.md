@@ -1,4 +1,14 @@
 # cobra-tools
+
+> **This is a fork.** It adds the ability to **write** Planet Coaster 2 motiongraphs
+> and to author the animation dropdown on animated scenery — a capability upstream
+> does not have (`create()` raises `NotImplementedError`). Measured against pristine
+> upstream on all 506 PC2 scenery assets: **0 regressions, 18 files fixed, 6
+> previously unreadable entries now load.** Verified in game.
+>
+> **See [FORK.md](FORK.md)** for what it adds, what is verified, and what is not.
+> Everything below is upstream's README, unchanged.
+
 "~~Life~~ Modding finds a way."
 
 A simple GUI for extracting OVL and OVS archives and modifying their contents, as well as editors for the associated in-house file formats. Also includes a model plugin for blender.

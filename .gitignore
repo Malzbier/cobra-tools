@@ -206,7 +206,11 @@ compressonator/process_results.txt
 /cobra-tools*.svg
 
 # created mods should not be saved as part of this repo.
-Mods/
+# Anchored: unanchored "Mods/" matches a directory of that name at ANY depth, and
+# git's ignore matching is case-insensitive on Windows and macOS - so it also
+# swallowed the source package plugin/mods/. Existing files there stayed tracked
+# only because they predate this rule; any NEW file was silently ignored.
+/Mods/
 
 # Cached icons
 /icons/cache
