@@ -1056,7 +1056,12 @@ def append_clips(graph_root, enum_holder, choices_root, specs):
         rows = [e for e in choices_root.iter() if e.get("index") is not None]
         newrow = copy.deepcopy(rows[-1])
         newrow.set("index", str(int(rows[-1].get("index")) + 1))
-        newrow.set("duration", str(spec.duration))
+        # choice_duration is what already knows None is invalid ("clip has no
+        # duration") and applies the sub-frame floor - writing spec.duration
+        # directly skipped both, and duration is optional in the spec schema,
+        # so a missing one reached the sequencer's own playDurationSeconds as
+        # the literal text "None"
+        newrow.set("duration", str(choice_duration(spec.duration)))
         lbl = newrow.find("./label")
         # the copied label still carries the donor's share id; leaving it would
         # make this row an alias of the donor's string instead of its own

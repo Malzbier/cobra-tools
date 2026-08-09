@@ -992,9 +992,6 @@ class TestAppendClipsRefuses:
 		with pytest.raises(ValueError, match="no additional_data_streams"):
 			append([clip_spec(events=audio_event())], g=graph(streams=False))
 
-	@pytest.mark.xfail(reason="a None duration is written into the choice row as the "
-							  "literal string 'None' instead of being refused",
-					   strict=True)
 	def test_a_spec_with_no_duration(self):
 		# choice_duration() already treats a missing duration as an error, and
 		# `duration` is optional in the spec schema, so the value can arrive here
