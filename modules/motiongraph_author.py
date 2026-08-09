@@ -950,6 +950,21 @@ def append_clips(graph_root, enum_holder, choices_root, specs):
             f"Entries are APPEND-ONLY because placed props store the choice index, "
             f"so re-adding a name would duplicate it with no way to remove it. "
             f"Append only the NEW clips, or start from the unmodified asset.")
+    # `existing` only ever catches a name repeated against the asset's PAST
+    # entries - it is a snapshot taken once, before any of `specs` is applied,
+    # so two specs in the SAME call sharing a name pass it just as silently:
+    # every post-condition below still agrees, because both really do land
+    seen, dup_within = set(), []
+    for s in specs:
+        if s.enum_name in seen:
+            dup_within.append(s.enum_name)
+        seen.add(s.enum_name)
+    if dup_within:
+        raise ValueError(
+            f"duplicate enum_name(s) within this call: "
+            f"{', '.join(sorted(set(dup_within)))}. Two specs cannot share one "
+            f"name - the entries are append-only, so a duplicate could never be "
+            f"told apart or removed afterward.")
     soe = graph_root.find("./state_output_entries/states")
     if soe is None:
         raise ValueError("state_output_entries/states not found in graph")

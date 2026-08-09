@@ -1017,9 +1017,6 @@ class TestAppendClipsRefuses:
 		with pytest.raises(ValueError):
 			append([clip_spec()], g=graph(children=False))
 
-	@pytest.mark.xfail(reason="the duplicate check only looks at names ALREADY in "
-							  "the asset, not at the specs list itself",
-					   strict=True)
 	def test_a_duplicate_within_one_specs_list(self):
 		with pytest.raises(ValueError, match="duplicate"):
 			append([clip_spec("A", enum_name="Same"),
