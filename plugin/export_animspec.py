@@ -20,7 +20,7 @@ import os
 
 import bpy
 
-from plugin.mods.operators import specs_from_scenery
+from modules.animspec_rows import specs_from_scenery
 from plugin.mods.properties import effects_game_candidates
 
 # v2: adds weight (Auto choice random-pool weight, null via "In random pool"

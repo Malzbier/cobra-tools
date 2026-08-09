@@ -195,7 +195,7 @@ class AnimEventItem(PropertyGroup):
 	WHEN an event fires is deliberately NOT a field here. It comes from
 	Action Pose Markers named "fx.<event index>.on" (required) and
 	"fx.<event index>.off" (kind="vfx" only, optional) on the choice's own
-	Action at export time - see plugin/mods/operators.py:events_from_choice.
+	Action at export time - see modules/animspec_rows.py:events_from_choice.
 	Blender's timeline is already scrubbed and synced to the Action; a
 	second, disconnected numeric field here would only invite it to
 	disagree with what the artist actually placed.

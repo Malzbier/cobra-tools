@@ -162,7 +162,7 @@ class TestEventsAtClipBoundary:
 	"""at=0.0 and at=1.0 are in-range (parse_events accepts [0.0, 1.0]
 	inclusive) and reachable from ordinary authoring: a Blender pose marker
 	placed on a clip's first or last frame yields exactly this fraction
-	(_marker_fraction in plugin/mods/operators.py).
+	(marker_fraction in modules/animspec_rows.py).
 
 	The curve is a STEP (see TestEvents), not a linear ramp, so a point
 	sharing an x with its neighbour is not an ambiguous overlap: value holds
