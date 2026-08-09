@@ -296,9 +296,17 @@ def apply_clip_prefix(ovl, prefix, clips=None):
       * rename_contents is a clean no-op, it works at the wrong layer
       * rename on the entries propagates inward correctly
 
-    Renames are built as EXACT per-clip pairs, never one loose substring rule:
-    rename does substring replacement, so a rule for "foo" would also rewrite
-    "foobar".
+    Renames are built as EXACT per-clip pairs, using the FULL loader name
+    (extension included) on both sides - never a bare stem. rename does
+    substring replacement, unanchored, across every loader in the asset, so a
+    short or partial pattern rewrites whatever else happens to contain it: a
+    bare stem "m" matches inside "x.motiongraph", and "bend" matches inside a
+    sibling clip "bendy.mani". The full name narrows that a great deal, but
+    cannot close it entirely - one clip's full name can still be a genuine
+    substring of another's (e.g. "a.mani" inside "aa.mani") - so the pairs are
+    also checked against every other loader and against each other before
+    anything is renamed, and refuse rather than risk corrupting a name that
+    was never meant to change.
 
     Returns the list of (old, new) pairs applied.
     """
@@ -309,7 +317,33 @@ def apply_clip_prefix(ovl, prefix, clips=None):
         stem = name.rsplit(".", 1)[0]
         if clips is not None and stem.lower() not in {c.lower() for c in clips}:
             continue
-        pairs.append((stem, f"{prefix}${stem}"))
+        pairs.append((name, f"{prefix}${name}"))
+
+    # rename applies every pair in sequence to the SAME string (so one pair's
+    # own new name can feed into and be further rewritten by the next), and it
+    # runs over every loader in the asset, not just the ones being renamed -
+    # so a pair's old name must not be a substring of any OTHER loader's name,
+    # nor of any other pair's new name, or that unrelated string is partially
+    # rewritten too. Refuse rather than corrupt: unlike the collision below,
+    # there is no way to name the "intended" outcome, only pick names that
+    # cannot be renamed together as one batch
+    all_strings = set(ovl.loaders) | {new for _, new in pairs}
+    unsafe = []
+    for old, new in pairs:
+        for other in all_strings:
+            if other in (old, new):
+                continue
+            if old in other:
+                unsafe.append((old, other))
+    if unsafe:
+        raise ValueError(
+            f"{len(unsafe)} clip rename(s) are unsafe as a batch: rename does "
+            f"unanchored substring replacement across every loader, so a name "
+            f"that is a substring of another gets partially rewritten too - "
+            f"{', '.join(f'{o!r} is contained in {s!r}' for o, s in unsafe[:4])}"
+            f"{' ...' if len(unsafe) > 4 else ''}. Rename the clashing clip(s) "
+            f"under names that are not substrings of each other, or one at a "
+            f"time.")
 
     # A .manis REPLACES only when injected under the entry name the asset already
     # uses; under any other name it lands ALONGSIDE. Export as "myprop_.manis"
@@ -324,7 +358,7 @@ def apply_clip_prefix(ovl, prefix, clips=None):
     # guts ("Can not rename, as new names collide with existing names"), naming no
     # clip and suggesting no action, so catch it here where the cause is known
     existing = set(ovl.loaders)
-    clash = [(old, new) for old, new in pairs if f"{new}.mani" in existing]
+    clash = [(old, new) for old, new in pairs if new in existing]
     if clash:
         raise ValueError(
             f"{len(clash)} clip(s) would collide with clips already in the asset: "

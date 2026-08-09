@@ -150,8 +150,10 @@ class FakeOvl:
 			del self.loaders[n]
 
 	def rename(self, pairs):
+		# apply_clip_prefix passes FULL loader names (extension included) on
+		# both sides, not bare stems
 		for old, new in pairs:
-			self.loaders[f"{new}.mani"] = self.loaders.pop(f"{old}.mani")
+			self.loaders[new] = self.loaders.pop(old)
 
 	def save(self, path, commands=None):
 		self.saved.append(path)
@@ -848,7 +850,7 @@ class TestApplyAnimspecTo:
 		logged = []
 		apply_animspec_to(ovl, spec, asset="MyProp", log=logged.append)
 		assert "MyProp$idle.mani" in ovl.loaders
-		assert "idle -> MyProp$idle" in logged[0]
+		assert "idle.mani -> MyProp$idle.mani" in logged[0]
 
 	def test_nothing_to_qualify_says_so(self, spec, gen):
 		logged = []
