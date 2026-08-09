@@ -1035,9 +1035,6 @@ class TestAppendClipsRefuses:
 
 class TestAppendClipsAtomicity:
 
-	@pytest.mark.xfail(reason="freshen renumbers the state and the id is then "
-							  "overwritten, orphaning refs to the state's own id",
-					   strict=True)
 	def test_every_ref_in_the_appended_state_still_resolves(self):
 		# a dangling ref is silent: the entry appears in the dropdown and plays
 		# nothing, which is exactly constraint 2 in the module docstring

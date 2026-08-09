@@ -967,8 +967,6 @@ def append_clips(graph_root, enum_holder, choices_root, specs):
     added = []
     for spec in specs:
         next_id = _next_free_id(graph_root)
-        new_id = str(next_id)
-        next_id += 1
 
         # --- define the State inside state_output_entries, as retail does -----
         # A State is DEFINED once here and REFERENCED from the branch that plays
@@ -983,8 +981,18 @@ def append_clips(graph_root, enum_holder, choices_root, specs):
         new_state = new_sr.find("./state")
         # the state gets its own definitions too, so editing its <mani> and
         # animation_flags cannot bleed back into the donor state
+        #
+        # new_id is read back from new_state AFTER freshen, never assigned
+        # separately: freshen walks sub.iter(), which yields new_state itself
+        # first (it is the root of the subtree, and every donor state has an
+        # id by construction - see the donor selection above), so it is
+        # always the first id freshen allocates. Assigning a DIFFERENT id here
+        # afterward - which this used to do - overwrote what freshen had just
+        # given the state, orphaning any ref inside the subtree that pointed
+        # at the donor's original id: freshen rewrote it to point at the id
+        # the state briefly held, not the one it ends up with
         next_id = freshen(new_state, next_id)
-        new_state.set("id", new_id)
+        new_id = new_state.get("id")
         new_state.find(".//mani").text = spec.clip
         new_state.find(".//data").set("animation_flags", str(spec.animation_flags))
         # A State cloned from a donor brings the donor's AdditionalDataStreams
