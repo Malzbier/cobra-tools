@@ -103,13 +103,13 @@ _SAFE_CLIP = re.compile(r"\A[A-Za-z0-9_$]+\Z")
 # curve_type is DERIVED from the event type, never chosen. Measured across every
 # datastream entry in the retail scenery corpus; the three groups sum exactly
 CURVE_TYPE_FOR = {
-	"AudioEvent": 1,
-	"VFXEnable": 65537,
-	"VFXDisable": 65537,
-	"AudioLoopingEvent": 0,
-	"AudioRTPC": 0,
-	"ParticleEmissionRate": 0,
-	"AudioLoopingEventWithRTPC": 0,
+    "AudioEvent": 1,
+    "VFXEnable": 65537,
+    "VFXDisable": 65537,
+    "AudioLoopingEvent": 0,
+    "AudioRTPC": 0,
+    "ParticleEmissionRate": 0,
+    "AudioLoopingEventWithRTPC": 0,
 }
 # VFX events name a prefab CHILD through ds_name and carry an EMPTY location;
 # audio events name a Wwise event through ds_name and place it via location,
@@ -119,95 +119,95 @@ _VFX_TYPES = frozenset(("VFXEnable", "VFXDisable", "ParticleEmissionRate"))
 
 
 def parse_events(rows, where, game=None):
-	"""Validate one clip's `events` list; returns normalised event dicts.
+    """Validate one clip's `events` list; returns normalised event dicts.
 
-	Shared by every consumer so the rules cannot drift. `at` is the trigger
-	position as a fraction of the clip, which is how the curve encodes timing -
-	the curve itself always spans the whole clip.
+    Shared by every consumer so the rules cannot drift. `at` is the trigger
+    position as a fraction of the clip, which is how the curve encodes timing -
+    the curve itself always spans the whole clip.
 
-	`game` is optional and only gates the CATALOGUE checks below: an audio
-	event's name against the measured event-bank hash set, and a VFX event's
-	optional `particle` against the measured .particleeffect list. Both are
-	real, checkable offline (mod-side catalogue mining proved it - see
-	constants/audio_hashes.py and constants/<game>/particles.py) and both are
-	otherwise silent in game. Omitting `game`, or an unmeasured game, skips
-	these checks rather than rejecting - a validator that rejects valid input
-	for lack of data is worse than one that does not check at all.
-	"""
-	if rows is None:
-		return []
-	if not isinstance(rows, list):
-		raise ValueError(f"{where}.events must be a list, got {type(rows).__name__}")
-	out = []
-	for i, e in enumerate(rows):
-		at_ = f"{where}.events[{i}]"
-		if not isinstance(e, dict):
-			raise ValueError(f"{at_} must be an object, got {type(e).__name__}")
-		for k in ("name", "type"):
-			if not isinstance(e.get(k), str) or not e[k].strip():
-				raise ValueError(f"{at_}.{k} must be a non-empty string")
-		type_ = e["type"]
-		if type_ not in CURVE_TYPE_FOR:
-			raise ValueError(
-				f"{at_}.type {type_!r} is not a datastream type the engine "
-				f"uses; retail only has {sorted(CURVE_TYPE_FOR)}")
-		if not _SAFE_NAME.match(e["name"]):
-			raise ValueError(
-				f"{at_}.name {e['name']!r} may only contain letters, digits "
-				f"and _ - it is an engine resource name")
-		# `name` on an audio event IS the Wwise event; catalogue-check it here
-		# On a VFX event `name` is a prefab child the author invents (nothing to
-		# check against a catalogue) - see `particle` below for the field that is
-		if type_ not in _VFX_TYPES and game is not None:
-			known = load_audio_event_hashes(game)
-			if known is not None and fnv1_32(e["name"].lower().encode()) not in known:
-				raise ValueError(
-					f"{at_}.name {e['name']!r} does not hash to any known "
-					f"{game} event bank entry, so it would be SILENT in game. "
-					f"Check the spelling against the Wwise event list.")
-		pos = e.get("at", 0.1)
-		if isinstance(pos, bool) or not isinstance(pos, (int, float)):
-			raise ValueError(f"{at_}.at must be a number, got {pos!r}")
-		if not 0.0 <= pos <= 1.0:
-			raise ValueError(
-				f"{at_}.at must be within the clip (0.0 to 1.0), got {pos}")
-		loc = e.get("location")
-		if loc is not None and (not isinstance(loc, str) or not _SAFE_NAME.match(loc)):
-			raise ValueError(
-				f"{at_}.location {loc!r} may only contain letters, digits and _")
-		if type_ in _VFX_TYPES:
-			if loc:
-				raise ValueError(
-					f"{at_}: a {type_} event places itself by naming a prefab "
-					f"child in `name`, so it must not set `location`")
-			loc = ""
-		elif loc is None:
-			loc = "Default"
-		# `particle` is informational only - it never reaches the graph (the
-		# graph only ever stores the prefab child's name) - but it is real,
-		# catalogue-checkable data the author would otherwise have to type into
-		# a prefab .particleeffect reference from memory. build()'s report
-		# turns it into the exact child->particle pairing to paste there
-		particle = e.get("particle")
-		if particle is not None:
-			if type_ not in _VFX_TYPES:
-				raise ValueError(
-					f"{at_}: `particle` only applies to VFX events "
-					f"(VFXEnable/VFXDisable/ParticleEmissionRate), not {type_}")
-			if not isinstance(particle, str) or not _SAFE_NAME.match(particle):
-				raise ValueError(
-					f"{at_}.particle {particle!r} may only contain letters, "
-					f"digits and _ - it is a .particleeffect resource name")
-			if game is not None:
-				known = ConstantsProvider().get(game, {}).get("particles")
-				if known and particle.lower() not in known:
-					raise ValueError(
-						f"{at_}.particle {particle!r} is not a known "
-						f".particleeffect name in {game} - check the spelling "
-						f"against the particle list.")
-		out.append({"name": e["name"], "type": type_, "at": float(pos),
-					"location": loc, "particle": particle})
-	return out
+    `game` is optional and only gates the CATALOGUE checks below: an audio
+    event's name against the measured event-bank hash set, and a VFX event's
+    optional `particle` against the measured .particleeffect list. Both are
+    real, checkable offline (mod-side catalogue mining proved it - see
+    constants/audio_hashes.py and constants/<game>/particles.py) and both are
+    otherwise silent in game. Omitting `game`, or an unmeasured game, skips
+    these checks rather than rejecting - a validator that rejects valid input
+    for lack of data is worse than one that does not check at all.
+    """
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ValueError(f"{where}.events must be a list, got {type(rows).__name__}")
+    out = []
+    for i, e in enumerate(rows):
+        at_ = f"{where}.events[{i}]"
+        if not isinstance(e, dict):
+            raise ValueError(f"{at_} must be an object, got {type(e).__name__}")
+        for k in ("name", "type"):
+            if not isinstance(e.get(k), str) or not e[k].strip():
+                raise ValueError(f"{at_}.{k} must be a non-empty string")
+        type_ = e["type"]
+        if type_ not in CURVE_TYPE_FOR:
+            raise ValueError(
+                f"{at_}.type {type_!r} is not a datastream type the engine "
+                f"uses; retail only has {sorted(CURVE_TYPE_FOR)}")
+        if not _SAFE_NAME.match(e["name"]):
+            raise ValueError(
+                f"{at_}.name {e['name']!r} may only contain letters, digits "
+                f"and _ - it is an engine resource name")
+        # `name` on an audio event IS the Wwise event; catalogue-check it here
+        # On a VFX event `name` is a prefab child the author invents (nothing to
+        # check against a catalogue) - see `particle` below for the field that is
+        if type_ not in _VFX_TYPES and game is not None:
+            known = load_audio_event_hashes(game)
+            if known is not None and fnv1_32(e["name"].lower().encode()) not in known:
+                raise ValueError(
+                    f"{at_}.name {e['name']!r} does not hash to any known "
+                    f"{game} event bank entry, so it would be SILENT in game. "
+                    f"Check the spelling against the Wwise event list.")
+        pos = e.get("at", 0.1)
+        if isinstance(pos, bool) or not isinstance(pos, (int, float)):
+            raise ValueError(f"{at_}.at must be a number, got {pos!r}")
+        if not 0.0 <= pos <= 1.0:
+            raise ValueError(
+                f"{at_}.at must be within the clip (0.0 to 1.0), got {pos}")
+        loc = e.get("location")
+        if loc is not None and (not isinstance(loc, str) or not _SAFE_NAME.match(loc)):
+            raise ValueError(
+                f"{at_}.location {loc!r} may only contain letters, digits and _")
+        if type_ in _VFX_TYPES:
+            if loc:
+                raise ValueError(
+                    f"{at_}: a {type_} event places itself by naming a prefab "
+                    f"child in `name`, so it must not set `location`")
+            loc = ""
+        elif loc is None:
+            loc = "Default"
+        # `particle` is informational only - it never reaches the graph (the
+        # graph only ever stores the prefab child's name) - but it is real,
+        # catalogue-checkable data the author would otherwise have to type into
+        # a prefab .particleeffect reference from memory. build()'s report
+        # turns it into the exact child->particle pairing to paste there
+        particle = e.get("particle")
+        if particle is not None:
+            if type_ not in _VFX_TYPES:
+                raise ValueError(
+                    f"{at_}: `particle` only applies to VFX events "
+                    f"(VFXEnable/VFXDisable/ParticleEmissionRate), not {type_}")
+            if not isinstance(particle, str) or not _SAFE_NAME.match(particle):
+                raise ValueError(
+                    f"{at_}.particle {particle!r} may only contain letters, "
+                    f"digits and _ - it is a .particleeffect resource name")
+            if game is not None:
+                known = ConstantsProvider().get(game, {}).get("particles")
+                if known and particle.lower() not in known:
+                    raise ValueError(
+                        f"{at_}.particle {particle!r} is not a known "
+                        f".particleeffect name in {game} - check the spelling "
+                        f"against the particle list.")
+        out.append({"name": e["name"], "type": type_, "at": float(pos),
+                    "location": loc, "particle": particle})
+    return out
 
 # The loc symbol is a PRIVATE key: the choice row stores "[symbol]" and the game
 # resolves it against a <symbol>.txt shipped in the same OVL. Nothing outside the
