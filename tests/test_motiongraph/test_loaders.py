@@ -60,7 +60,7 @@ def loader(ovl=None, cls=MotiongraphLoader):
 class TestAcceptStringTakesTheDollarForm:
 	"""accept_string gained the `$` form; the `@` form must still work."""
 
-	@pytest.mark.parametrize("name", ["AT_Medusa$Idle02", "Prefix$", "$"])
+	@pytest.mark.parametrize("name", ["Asset$Idle02", "Prefix$", "$"])
 	def test_pc2_clip_references_are_renamed(self, name):
 		# without this a renamed PC2 asset keeps every <mani> reference pointed
 		# at the ORIGINAL name, and the copy animates nothing

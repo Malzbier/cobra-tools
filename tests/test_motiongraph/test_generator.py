@@ -167,10 +167,9 @@ class TestEventsAtClipBoundary:
 	The curve is a STEP (see TestEvents), not a linear ramp, so a point
 	sharing an x with its neighbour is not an ambiguous overlap: value holds
 	from each point's x onward, and retail's own staircase-trigger curves
-	(.scratch/motiongraph-format/issues/14-curve-y-encoding.md - ws_cowboy$tiphat,
-	8 risers, "the final point just holds") use exactly this encoding for a
-	trigger at a boundary sample. These tests pin that reading so it cannot
-	silently change.
+	use exactly this encoding for a trigger at a boundary sample (measured on
+	ws_cowboy$tiphat, an 8-riser curve where the final point just holds).
+	These tests pin that reading so it cannot silently change.
 	"""
 
 	def _curve(self, at):

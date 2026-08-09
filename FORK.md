@@ -4,7 +4,7 @@ A fork of [cobra-tools](https://github.com/OpenNaja/cobra-tools) adding the abil
 to **write** Planet Coaster 2 motiongraphs, and to author the animation dropdown that
 appears on animated scenery.
 
-Based on upstream `c65ebddf7`. 68 commits, 89 files, +10200 lines.
+Based on upstream `c65ebddf7`. 20 commits, 98 files, +14582 lines.
 
 > **Status: working, and verified in game — with the limits in "What is not done"
 > below.** Published as a fork so it can be tried without waiting on a PR.
@@ -74,6 +74,16 @@ The `.ms2` failures are characterised but not fixed; see
 `docs/animated-scenery.md` §13 in the companion repo for why a fix needs a carrier
 through the standalone `.ms2` format.
 
+This table predates the 2026-08-09 test-coverage pass (14 fixes; see the commit
+history for the full list) and was not re-run at full corpus after it — none of
+those fixes touch the plain load/modify/save path this measures (they live in the
+authoring-only functions `append_clips`, `apply_clip_prefix` and the `.motiongraph`
+root-tail write, none of which a bare corpus scan exercises), so the table is
+expected to still hold. That expectation has direct, fresh support rather than
+resting only on reasoning: a 24-asset PC2 sample was run byte-for-byte identically
+before and after all 14 fixes, same commit history otherwise, and returned the same
+result both times.
+
 ---
 
 ## Verified in game
@@ -91,6 +101,29 @@ Planet Coaster 2 build 1.10.3, custom asset built end to end from a donor:
   plus the graph, vars, choices, manis and enumnamer. That was achieved with a
   second `rename` pass for the donor's differently-named sub-resources; see "Two
   things to check afterwards"
+
+**This run predates the 2026-08-09 fix pass**, and it exercised exactly the code
+that pass changed: the 3 appended entries went through `append_clips`, and building
+the asset went through `apply_clip_prefix`. Four real bugs in those two functions
+were found and fixed after this verification ran (id/ref handling on a cloned
+state, a duplicate-name check that only compared against the asset's past entries
+not the current batch, a defaulted enum name skipping a charset check, and
+`apply_clip_prefix` corrupting an unrelated loader name when one clip's name was a
+substring of another's) - none reachable from this specific asset, or this
+verification would have shown it, but the coverage story for this section was
+weaker than it read.
+
+**Re-verified 2026-08-09, after the fix pass, on a second asset (`AT_Medusa` in the
+companion `mod_animtest` repo), append_clips specifically:** rebuilt, redeployed,
+selected and placed with no crash, dropdown carries all 9 entries (5 original + 4
+newly appended) with correct authored label text, both a looping and a one-shot
+entry over the same clip play correctly, and a clip's duration in the timeline
+matches its true `.manis` length. This confirms `append_clips`' fixes on real data
+end to end. **`apply_clip_prefix` (F3) was not re-verified in game** - `AT_Medusa`'s
+build script calls `append_clips` directly and does not go through it, and no
+existing real-data workflow does either. It still rests on synthetic tests only;
+treat the "zero donor naming" bullet above as unconfirmed against the current code
+until it is.
 
 ## Tested against the whole corpus
 
@@ -146,6 +179,15 @@ measure passes all four. Noted for completeness, not a known breakage.
 **In-game testing is narrow.** One asset, one park, one game build. The corpus gate
 is broad; the in-game evidence is not.
 
+**`apply_clip_prefix` has no real-data verification, only synthetic tests.** The
+2026-08-09 fix pass corrected a real bug in it (an unanchored rename corrupting an
+unrelated loader's name when one clip's name was a substring of another's,
+`bend.mani`/`bendy.mani`-shaped), verified against the actual rename mechanism in
+unit tests, but no existing build script in the companion `mod_animtest` repo
+calls this function, so it has not been exercised on a real asset or in game since.
+`append_clips`, which the same pass also fixed, HAS been re-verified this way (see
+"Verified in game" above) - `apply_clip_prefix` is the one specific gap left.
+
 ---
 
 ## Two ways to get an asset
@@ -178,7 +220,9 @@ an extract-to-XML round-trip, producing a file the engine walks into wild reads
 rather than an obviously broken one. That is why upstream's `create()` refuses
 outright. **This fork fixed that**: the round-trip measures 100/100 semantic
 across the corpus (re-measured 2026-07-31 on this branch), and a rebuilt graph
-(including one with added branches) is confirmed loading and animating in-game.
+(including one with added branches) is confirmed loading and animating in-game -
+the same `append_clips` verification as "Verified in game" above, both the
+pre-fix run and the 2026-08-09 re-verification after it.
 
 The flow still starts from a donor because **renaming is exact by construction**:
 it edits strings in the existing pools and re-points fragments, so nothing is
