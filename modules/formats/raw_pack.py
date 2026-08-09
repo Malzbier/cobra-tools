@@ -18,7 +18,9 @@ Layout, little-endian:
 
     magic       4s      b"CBRW"
     version     u32
-    mime_ver    u32
+    mime_ver    u32     required - identifies which struct layout the blocks
+                        were written against, so a pack cannot mean anything
+                        without one
     pool_type   u32
     set_pool    u32     NONE when the source had none
     root_block  u32     NONE when the loader has no root
@@ -29,6 +31,9 @@ Layout, little-endian:
     ext         zstr
     ovs_name    zstr
     blocks      n_blocks x (pool_type u32, size u32)
+                        pool_type is required per block - every block belongs
+                        to exactly one pool, unlike the loader-level fields
+                        above, which are genuinely optional
     relocs      n_relocs x (src_block u32, src_off u32, dst_block u32, dst_off u32)
                 dst_block == NONE marks an empty pointer, whose target is the END of a
                 pool; dst_off then names an anchor BLOCK whose pool that is. Recorded as
@@ -75,12 +80,30 @@ def _u32(v):
 
 def pack(exported):
 	"""dict from BaseFile.raw_export -> bytes"""
+	# version and each block's pool_type are the two fields _u32 cannot treat
+	# as "absent means NONE" the way it does set_pool/root_block/dst_block:
+	# unpack has nothing to translate the sentinel back to for them - there is
+	# no meaningful "packed with no version" or "block with no pool" - so a
+	# missing one used to silently become the literal integer 4294967295 on
+	# the read side instead of round-tripping as None like everything else.
+	# Refuse here, before that is ever written
+	version = exported.get("version")
+	if version is None:
+		raise ValueError(
+			"a raw pack needs a version - it identifies which struct layout "
+			"the blocks were written against, and a pack without one is not "
+			"a meaningful artifact")
 	blocks = exported["blocks"]
+	for i, b in enumerate(blocks):
+		if b.get("pool_type") is None:
+			raise ValueError(
+				f"block {i} has no pool_type - every block belongs to "
+				f"exactly one pool")
 	relocs = exported["relocations"]
 	deps = exported.get("dependencies", ())
 	out = [_HEAD.pack(
 		MAGIC, VERSION,
-		_u32(exported.get("version")),
+		_u32(version),
 		_u32(exported.get("pool_type")),
 		_u32(exported.get("set_pool_type")),
 		_u32(exported.get("root_block")),
