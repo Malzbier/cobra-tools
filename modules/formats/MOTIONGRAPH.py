@@ -69,6 +69,11 @@ class MotiongraphLoader(MemStructLoader):
 		MemStruct._from_xml restores unknown attributes verbatim - so this rides
 		the existing round-trip channel instead of inventing one.
 		"""
+		# Recorded distinctly from "nothing to capture": a load that could not even
+		# determine whether a tail exists must not be indistinguishable, on write,
+		# from an asset that genuinely has none - the former silently drops bytes
+		# retail has, the latter is correct as-is
+		self._root_tail_capture_failed = False
 		try:
 			pool, off = self.root_ptr
 			blk = pool.size_map.get(off)
@@ -79,13 +84,27 @@ class MotiongraphLoader(MemStructLoader):
 					self.header.name_root_tail = tail.hex()
 		except Exception:
 			logging.exception(f"Could not capture root tail for {self.name}")
+			self._root_tail_capture_failed = True
 
 	def write_root_tail(self, stream):
 		"""Write back the root tail captured by capture_root_tail.
 
 		Several retail assets have a 288-byte root block against a 72-byte header;
 		the remaining 216 bytes are preserved verbatim rather than modelled.
+
+		Refuses rather than silently shipping a short file if capture failed
+		earlier: this runs on the SAVE path, where the loss is about to become
+		permanent, so it is the last point that can still stop it. A load is
+		never failed for this - one asset's odd root block should not block
+		inspecting or extracting anything else - but a write that would drop
+		bytes retail has must not proceed quietly.
 		"""
+		if getattr(self, "_root_tail_capture_failed", False):
+			raise ValueError(
+				f"{self.name}: the root block's tail could not be read when "
+				f"this asset was loaded (see the earlier 'Could not capture "
+				f"root tail' log entry) - writing it now would silently drop "
+				f"bytes retail has, refusing instead")
 		tail = getattr(self.header, "name_root_tail", None)
 		if tail:
 			stream.write(bytes.fromhex(tail))
