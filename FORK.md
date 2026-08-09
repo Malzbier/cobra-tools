@@ -4,7 +4,7 @@ A fork of [cobra-tools](https://github.com/OpenNaja/cobra-tools) adding the abil
 to **write** Planet Coaster 2 motiongraphs, and to author the animation dropdown that
 appears on animated scenery.
 
-Based on upstream `c65ebddf7`. 20 commits, 98 files, +14582 lines.
+Based on upstream `c65ebddf7`. 17 commits, 98 files, +14625 lines.
 
 > **Status: working, and verified in game — with the limits in "What is not done"
 > below.** Published as a fork so it can be tried without waiting on a PR.
@@ -332,9 +332,11 @@ prefix typed by hand is **discarded rather than trusted**, so `Wobble`,
 
 Intended to be split into two pull requests once it has had some use:
 
-1. **General OVL fixes** — 5 commits that apply cleanly to `origin/master` on their
-   own and fix 18 retail files with no motiongraph code involved
-2. **Motiongraph support** — the new capability
+1. **General OVL fixes** — the first commit on this branch, applies cleanly to
+   `origin/master` on its own, fixes 18 retail files with no motiongraph code
+   involved
+2. **Motiongraph support** — everything after it, including the 2026-08-09 test
+   and fix pass, which is entirely inside the motiongraph/authoring domain
 
 Both are validated independently; the split is deferred until real feedback exists.
 
