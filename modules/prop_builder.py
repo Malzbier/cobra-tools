@@ -247,8 +247,19 @@ def existing_loc_texts(report, dest_dir):
         path = os.path.join(dest_dir, f"{symbol}.txt")
         if not os.path.isfile(path):
             continue
-        with open(path, encoding="utf-8") as fh:
-            out.append((symbol, fh.read(), text))
+        # utf-8-sig and newline="" mirror write_loc_texts exactly: a file an
+        # editor saved with a BOM would otherwise read back with a leading
+        # ﻿ and look changed when it is not, and universal newlines would
+        # fold a CRLF file to \n so it looks UNchanged when a rewrite would in
+        # fact alter every line ending
+        try:
+            with open(path, encoding="utf-8-sig", newline="") as fh:
+                current = fh.read()
+        except (UnicodeDecodeError, OSError):
+            # same degradation as existing_outputs: the caller still gets to
+            # decide about a file it cannot preview
+            current = None
+        out.append((symbol, current, text))
     return out
 
 
@@ -275,10 +286,12 @@ def write_loc_texts(report, dest_dir, skip=(), log=print):
 
     Returns the paths written.
     """
-    os.makedirs(dest_dir, exist_ok=True)
-    skip = set(skip)
-    written, kept = [], []
-    for symbol, (_enum, text) in zip(report["loc_symbols"], report["labels"]):
+    pairs = list(zip(report["loc_symbols"], report["labels"]))
+    # Validate EVERY symbol before writing ANY file. Refusing mid-loop would
+    # leave the earlier files on disk with no way for the caller to learn which
+    # ones landed
+    seen = {}
+    for symbol, _label in pairs:
         # parse_spec already constrains enum names and the generator the asset
         # name, precisely because a symbol becomes a FILENAME here - re-check
         # rather than trust a report that could have come from anywhere
@@ -286,6 +299,21 @@ def write_loc_texts(report, dest_dir, skip=(), log=print):
             raise PropBuildError(
                 f"loc symbol {symbol!r} is not a bare name - refusing to use it "
                 f"as a filename")
+        # Windows and macOS filesystems are case-insensitive by default, so two
+        # symbols differing only in case are ONE file there and two on Linux -
+        # the second write would silently destroy the first label
+        clash = seen.get(symbol.lower())
+        if clash is not None and clash != symbol:
+            raise PropBuildError(
+                f"loc symbols {clash!r} and {symbol!r} differ only in case, so "
+                f"they are the same file on Windows and macOS and one label "
+                f"would be lost - rename one of the animation choices")
+        seen[symbol.lower()] = symbol
+
+    os.makedirs(dest_dir, exist_ok=True)
+    skip = set(skip)
+    written, kept = [], []
+    for symbol, (_enum, text) in pairs:
         if symbol in skip:
             kept.append(symbol)
             continue
@@ -348,27 +376,53 @@ def apply_animspec_to(ovl, spec_path, asset=None, ovl_path=None,
     blend = blend_time if blend_time is not None else \
         (spec_blend if spec_blend is not None else 0.15)
 
-    # Qualify first, exactly as build() does - and for the same reason: only
-    # OvlFile.rename retargets clip names correctly, so it has to happen on a
-    # packed container, before the graph that references the qualified names
-    # is generated against it
-    stale = [k for k in ovl.loaders
-             if k.endswith((".motiongraph", ".enumnamer", ".sceneryanimchoices"))]
-    if stale:
-        log(f"replacing existing generated entries: {sorted(stale)}")
-        ovl.remove(stale)
-    pairs = apply_clip_prefix(ovl, asset)
+    # Only remove entries THIS call is about to replace - never everything of
+    # the same extension. A container can legitimately hold more than one
+    # generated set: retail ships assets built from several independently
+    # placeable parts (two separate doors sharing one OVL) as well as single
+    # objects whose animation is split across synchronised parts (a water
+    # wheel and its post, which cannot be separated or animated apart) - and
+    # a blind sweep destroyed either shape, deleting a working object nothing
+    # here was asked to touch.
+    #
+    # loopanimselection.enumnamer is NOT asset-qualified (unlike retail's own
+    # convention, e.g. wheel_large_01_loopanimselection.enumnamer) - every
+    # asset this tool generates for wants that exact name, so it can never be
+    # safely attributed to one graph in a container that already holds
+    # another. Any OTHER generated-looking entry left over refuses rather than
+    # guesses: the alternative is a name collision on the next apply, or
+    # silently orphaning a part this call was never told about.
+    own = {f"{asset.lower()}.motiongraph", "loopanimselection.enumnamer",
+           f"{asset.lower()}.sceneryanimchoices"}
+    existing = [k for k in ovl.loaders
+               if k.endswith((".motiongraph", ".enumnamer", ".sceneryanimchoices"))]
+    ours = [k for k in existing if k in own]
+    others = sorted(k for k in existing if k not in own)
+    if others:
+        raise PropBuildError(
+            f"{asset!r} would replace generated entries, but this container "
+            f"also carries {others}, which do not belong to {asset!r} and "
+            f"would not be touched - remove them first if they are stale, or "
+            f"apply against the asset they DO belong to")
+    if ours:
+        log(f"replacing existing generated entries: {sorted(ours)}")
+        ovl.remove(ours)
+    try:
+        pairs = apply_clip_prefix(ovl, asset)
+    except ValueError as e:
+        # a clip collision is a user error, and this function's contract is
+        # PropBuildError - the CLI and the GUI both catch only that
+        raise PropBuildError(str(e)) from e
     log("qualified clips: " + (", ".join(f"{a} -> {b}" for a, b in pairs)
                                or "(none needed)"))
-    check_prefix_consistent(ovl, asset)
-
-    vars_ref = _sole_vars_ref(ovl, ovl_path or asset, asset)
     try:
+        check_prefix_consistent(ovl, asset)
+        vars_ref = _sole_vars_ref(ovl, ovl_path or asset, asset)
         return _generate_into(ovl, asset, choices, vars_ref, blend, game,
                               src_hint=os.path.basename(ovl_path) or asset,
                               out_ovl=ovl_path, log=log)
     except ValueError as e:
-        raise PropBuildError(str(e))
+        raise PropBuildError(str(e)) from e
 
 
 def _sole_vars_ref(o, ovl_path, asset):
@@ -444,11 +498,15 @@ def build(cobra_dir, asset, art_dir, dest_dir, choices, blend_time,
     cfg = config.Config(cobra_dir)
     cfg.load()
 
-    art_files = sorted(glob.glob(os.path.join(art_dir, "*.ms2")) +
-                       glob.glob(os.path.join(art_dir, "*.manis")) +
-                       glob.glob(os.path.join(art_dir, "*.fgm")) +
-                       glob.glob(os.path.join(art_dir, "*.tex")) +
-                       glob.glob(os.path.join(art_dir, "*.motiongraphvars")))
+    # escape the DIRECTORY: glob reads [ ] ? in it as pattern syntax, so an art
+    # folder named "My Prop [v2]" would match nothing and report "no art" while
+    # the user is looking straight at the files
+    art_glob = glob.escape(art_dir)
+    art_files = sorted(glob.glob(os.path.join(art_glob, "*.ms2")) +
+                       glob.glob(os.path.join(art_glob, "*.manis")) +
+                       glob.glob(os.path.join(art_glob, "*.fgm")) +
+                       glob.glob(os.path.join(art_glob, "*.tex")) +
+                       glob.glob(os.path.join(art_glob, "*.motiongraphvars")))
     if not art_files:
         raise PropBuildError(f"no art (.ms2/.manis) in {art_dir}")
     # A .tex is CREATED from its source images (the PNGs its exporter wrote
@@ -499,28 +557,39 @@ def build(cobra_dir, asset, art_dir, dest_dir, choices, blend_time,
     # authoritative)
     ovl = _fresh(cfg, game)
     ovl.add_files(art_files, art_dir)
-    pairs = apply_clip_prefix(ovl, asset)
-    log(f"art: {[os.path.basename(f) for f in art_files]}")
-    log("qualified clips: " + (", ".join(f"{a} -> {b}" for a, b in pairs)
-                               or "(none needed)"))
-    check_prefix_consistent(ovl, asset)
+    # both of these raise ValueError on what is a plain user error - a clip
+    # name that collides, or art from another asset - and this function's
+    # contract is PropBuildError, so translate rather than let a traceback out
+    try:
+        pairs = apply_clip_prefix(ovl, asset)
+        log(f"art: {[os.path.basename(f) for f in art_files]}")
+        log("qualified clips: " + (", ".join(f"{a} -> {b}" for a, b in pairs)
+                                   or "(none needed)"))
+        check_prefix_consistent(ovl, asset)
+    except ValueError as e:
+        raise PropBuildError(str(e)) from e
 
     report = _generate_into(ovl, asset, choices, vars_ref, blend_time,
                             game, src_hint=art_dir, out_ovl=out_ovl, log=log)
     # The writes, all at the end and all on the same terms: everything above
     # happened in memory, so a build that fails leaves nothing behind, and
     # anything the caller listed in `skip` is left exactly as it was
-    skipped = {os.path.normpath(p) for p in skip}
-    if os.path.normpath(out_ovl) in skipped:
+    # normcase as well as normpath: Windows and macOS resolve paths case
+    # insensitively, so a skip entry differing only in case names the very file
+    # the user asked to keep, and matching on normpath alone would overwrite it
+    skipped = {os.path.normcase(os.path.normpath(p)) for p in skip}
+    if os.path.normcase(os.path.normpath(out_ovl)) in skipped:
         log(f"kept existing {out_ovl} - not overwritten")
     else:
         ovl.save(out_ovl, commands={"update_aux": False})
         log(f"created: {out_ovl}")
     # The loc text is an output of this build like the OVL is, so it lands in
     # the same folder and obeys the same skip list
+    # derived from the ORIGINAL skip paths, not the normcased set: a loc symbol
+    # has to match the report's own casing, and normcase would have lowered it
     write_loc_texts(report, dest_dir, log=log,
                     skip={os.path.splitext(os.path.basename(p))[0]
-                          for p in skipped if p.lower().endswith(".txt")})
+                          for p in skip if p.lower().endswith(".txt")})
     return report
 
 
@@ -542,6 +611,17 @@ def _generate_into(ovl, asset, choices, vars_ref, blend_time, game,
     messages (build: the art folder; apply: the OVL itself); `out_ovl` is
     only the path reported back to the caller."""
     # --- 2. generated graph + enumnamer --------------------------------------
+    # blend_time is arithmetic on every choice duration and is interpolated
+    # straight into the graph, so a None reaches the XML as the text "None" and
+    # surfaces much later as an add-files failure naming nothing the user can
+    # act on, while a negative silently makes a choice shorter than its clip
+    if not isinstance(blend_time, (int, float)) or isinstance(blend_time, bool):
+        raise PropBuildError(
+            f"blend_time must be a number, not {blend_time!r}")
+    if blend_time < 0:
+        raise PropBuildError(
+            f"blend_time {blend_time} is negative, which would make a choice "
+            f"shorter than the clip it plays")
     graph_xml, enum_xml = generate(asset, choices, vars_ref, blend_time,
                                    game=game)
     work = tempfile.mkdtemp()
@@ -627,10 +707,21 @@ def _generate_into(ovl, asset, choices, vars_ref, blend_time, game,
     # Durations come from the built asset's manis. The Auto choice has no clip
     # of its own; its duration follows the longest clip (retail convention)
     mw = tempfile.mkdtemp()
-    mk = [x for x in ovl.loaders if x.endswith(".manis")][0]
-    mf = ManisFile()
-    mf.load(_extract_one(ovl, mk, mw))
-    dur = {mi.name.split("$")[-1].lower(): mi.duration for mi in mf.mani_infos}
+    # EVERY .manis, not just the first: step 3 above unions clip names across
+    # all of them, so reading durations from one container would report a clip
+    # as missing that the asset plainly has. Retail ships several per asset
+    # (SC_Villager_Animatronic and TY_Animatronics carry three each)
+    mks = [x for x in ovl.loaders if x.endswith(".manis")]
+    if not mks:
+        raise PropBuildError(
+            f"{src_hint} has no .manis, so no clip has a duration - pack the "
+            f"animations before adding an animation spec")
+    dur = {}
+    for mk in mks:
+        mf = ManisFile()
+        mf.load(_extract_one(ovl, mk, mw))
+        dur.update({mi.name.split("$")[-1].lower(): mi.duration
+                    for mi in mf.mani_infos})
 
     labels = []
     rows = []

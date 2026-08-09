@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from modules.motiongraph_generator import generate
+from modules.motiongraph_generator import Ids, generate
 
 AUTO = ("Default", None, None, "Auto")
 VALID = [AUTO,
@@ -231,3 +231,24 @@ class TestGenerateRefusals:
 
 	def test_empty_choices(self):
 		self.refused("MyProp", [], "MyPropVars", 0.15)
+
+	def test_the_auto_choice_alone_has_nothing_to_pick_from(self):
+		# a dropdown whose only entry picks at random between no clips
+		self.refused("MyProp", [AUTO], "MyPropVars", 0.15)
+
+
+class TestIds:
+	"""The id allocator underpins every ref in the graph."""
+
+	def test_first_mention_defines_and_numbers_from_one(self):
+		ids = Ids()
+		assert ids.define("state") == 'id="1"'
+		assert ids.define("other") == 'id="2"'
+
+	def test_a_key_defined_twice_is_refused(self):
+		# a raise rather than an assert on purpose: two blocks under one id
+		# corrupt every ref to it, and asserts vanish under -O
+		ids = Ids()
+		ids.define("state")
+		with pytest.raises(ValueError, match="defined twice"):
+			ids.define("state")
