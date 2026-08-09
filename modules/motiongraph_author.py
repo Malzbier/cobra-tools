@@ -487,21 +487,17 @@ def parse_spec(payload, game=None):
             raise ValueError(
                 f"{where}.enum_name must be a non-empty string, got {c['enum_name']!r}")
 
-        # clip and enum_name become identifiers in the graph, and enum_name also
-        # becomes the tail of a generated loc symbol, which becomes a FILENAME
-        # label_text is exempt: it is prose shown to the player and is only ever
-        # file CONTENT, never a path
-        checks = [("clip", _SAFE_CLIP, "letters, digits, _ and $")]
-        if "enum_name" in c:
-            checks.append(("enum_name", _SAFE_NAME, "letters, digits and _"))
-        for k, pat, what in checks:
-            v = c[k]
-            if not pat.match(v):
-                raise ValueError(
-                    f"{where}.{k} {v!r} may only contain {what}. This is not "
-                    f"cosmetic: it becomes part of the name of a localisation "
-                    f"file, so a separator or '..' here would write outside the "
-                    f"localisation directory.")
+        # clip becomes an identifier in the graph; enum_name (explicit or
+        # defaulted below) becomes the tail of a generated loc symbol, which
+        # becomes a FILENAME. label_text is exempt: it is prose shown to the
+        # player and is only ever file CONTENT, never a path
+        v = c["clip"]
+        if not _SAFE_CLIP.match(v):
+            raise ValueError(
+                f"{where}.clip {v!r} may only contain letters, digits, _ and "
+                f"$. This is not cosmetic: it becomes part of the name of a "
+                f"localisation file, so a separator or '..' here would write "
+                f"outside the localisation directory.")
 
         # `loop` is a plain bool; the caller maps it to animation_flags (17/16)
         # The spec deliberately does NOT carry the bitfield - see export_animspec
@@ -533,6 +529,21 @@ def parse_spec(payload, game=None):
         if not short:
             raise ValueError(f"{where}.clip {c['clip']!r} has no name after the '$'")
         enum = c.get("enum_name") or short
+
+        # Checked on the FINAL value, not on c.get("enum_name") before the
+        # default applies: short_clip only strips the FIRST '$', so a clip
+        # like "A$B$C" defaults to "B$C" - a defaulted enum_name is exactly as
+        # much a loc-symbol tail, and exactly as much a filename, as an
+        # explicit one, and skipping this for the defaulted case was the bug
+        if not _SAFE_NAME.match(enum):
+            raise ValueError(
+                f"{where}.enum_name {enum!r} may only contain letters, digits "
+                f"and _. This is not cosmetic: it becomes part of the name of "
+                f"a localisation file, so a separator or '..' here would "
+                f"write outside the localisation directory."
+                + ("" if "enum_name" in c else
+                   f" (defaulted from clip {c['clip']!r} - give an explicit "
+                   f"enum_name instead)"))
 
         # APPEND-ONLY means index is identity, so a duplicate enum_name is
         # ambiguous rather than merely untidy - two rows would claim the same

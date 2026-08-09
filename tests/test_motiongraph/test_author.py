@@ -523,14 +523,15 @@ class TestParseSpec:
 		row = parse_spec(one_clip(events=[{"name": "VFX_X", "type": "VFXEnable"}]))[0]
 		assert row["events"][0]["location"] == ""
 
-	@pytest.mark.xfail(reason="a DEFAULTED enum_name is never charset-checked, so a "
-							  "'$' from the clip name reaches a loc FILENAME",
-					   strict=True)
 	def test_a_defaulted_enum_name_is_charset_checked_too(self):
 		# short_clip splits on the FIRST '$' only, so "A$B$C" defaults the enum
-		# name to "B$C" - which loc_symbol turns into "..._B$C.txt"
+		# name to "B$C" - which loc_symbol turns into "..._B$C.txt". one_clip's
+		# base payload always carries an enum_name, so the key is dropped here
+		# to genuinely exercise the DEFAULTED path, not the explicit one
+		body = one_clip(clip="A$B$C")
+		del body["clips"][0]["enum_name"]
 		with pytest.raises(ValueError, match="localisation"):
-			parse_spec(one_clip(clip="A$B$C"))
+			parse_spec(body)
 
 
 class TestLoadSpec:
