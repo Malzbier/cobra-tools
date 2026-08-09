@@ -94,7 +94,9 @@ class BuildPropDialog(window.ModalDialog):
 		self.addWidget(self.art_widget, 1, 1)
 
 		self.dest_widget = self.make_dir_selector("", parent.cfg)
-		self.dest_widget.setToolTip("Output folder for <asset>.ovl - recreated on build")
+		self.dest_widget.setToolTip(
+			"Output folder for <asset>.ovl and its loc text - not wiped; each "
+			"file is overwritten on rebuild unless you choose to keep it")
 		self.addWidget(QtWidgets.QLabel("Output folder"), 2, 0)
 		self.addWidget(self.dest_widget, 2, 1)
 
