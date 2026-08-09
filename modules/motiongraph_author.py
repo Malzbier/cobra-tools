@@ -929,6 +929,14 @@ def append_clips(graph_root, enum_holder, choices_root, specs):
     `enum_holder` may be the .enumnamer root or the list element itself; see
     resolve_enum_holder.
 
+    Every failure mode this function knows how to name is checked BEFORE any
+    spec is applied - a bad spec refuses cleanly, with nothing in `specs`
+    partially landed. That is not the same as being transactional: an error
+    this function does not already recognise can still surface mid-batch, and
+    nothing here rolls the earlier specs back if it does. Callers should treat
+    a raised exception as leaving the trees unfit to reuse, not merely
+    "missing what failed" - reload rather than retry against the same objects.
+
     Returns a list of dicts describing what was added - index, state id, branch
     count_0, and the loc symbol/text the caller still has to write out.
     """
@@ -979,19 +987,54 @@ def append_clips(graph_root, enum_holder, choices_root, specs):
     if LUA_RESULTS_MARKER not in lua.text:
         raise ValueError(f"{LOOP_ANIM_SELECTION} entry not found in lua_results")
 
+    # Every spec clones the SAME donor, so a check on the donor's own structure
+    # is one check for the whole batch, not one per spec - and checking it here,
+    # before anything is mutated, means a bad spec refuses cleanly instead of
+    # leaving the specs before it already landed in the graph with nothing after
+    # them. This does not make the function transactional: an internal error
+    # this function does not already know how to name can still land mid-batch.
+    # Nothing today calls it that way - the CLI is the only caller, and it loads
+    # fresh, mutates, and only writes on success - but the guarantee is "the
+    # failure modes below refuse up front", not "every failure rolls back"
+    donor = next((sr for sr in soe.findall("./statereference")
+                  if sr.find("./state") is not None
+                  and sr.find("./state").get("id") is not None
+                  and sr.find(".//mani") is not None), None)
+    if donor is None:
+        raise ValueError("no full State definition to copy")
+    if any(spec.events for spec in specs):
+        # additional_data_streams surviving strip_datastreams is the ELEMENT,
+        # not its children - see strip_datastreams - so this predicts the
+        # post-strip clone exactly, without cloning anything to check it.
+        # freshen() only reassigns an id an element ALREADY has - it never adds
+        # one - so "no id" on the donor predicts "no id" on every clone too;
+        # checking only .find(...) is None here would miss that half of it
+        donor_state = donor.find("./state")
+        donor_sync = donor_state.find(".//sync_prop_through_variable")
+        if donor_sync is None or donor_sync.get("id") is None:
+            raise ValueError(
+                "donor state has no defined sync_prop_through_variable to bind "
+                "events to, needed because at least one spec in this call "
+                "carries events")
+        if donor_state.find(".//additional_data_streams") is None:
+            raise ValueError(
+                "donor state has no additional_data_streams to fill, needed "
+                "because at least one spec in this call carries events")
+    for spec in specs:
+        try:
+            choice_duration(spec.duration)
+        except ValueError as e:
+            raise ValueError(f"{spec.clip}: {e}") from e
+
     added = []
     for spec in specs:
         next_id = _next_free_id(graph_root)
 
         # --- define the State inside state_output_entries, as retail does -----
         # A State is DEFINED once here and REFERENCED from the branch that plays
-        # it; that is the structure retail's own graphs use
-        donor = next((sr for sr in soe.findall("./statereference")
-                      if sr.find("./state") is not None
-                      and sr.find("./state").get("id") is not None
-                      and sr.find(".//mani") is not None), None)
-        if donor is None:
-            raise ValueError("no full State definition to copy")
+        # it; that is the structure retail's own graphs use. `donor` is found
+        # once above, not per spec: it is the same donor every time, and the
+        # search would only ever (re)find the same first match regardless
         new_sr = copy.deepcopy(donor)
         new_state = new_sr.find("./state")
         # the state gets its own definitions too, so editing its <mani> and
@@ -1023,12 +1066,9 @@ def append_clips(graph_root, enum_holder, choices_root, specs):
             # bone_i_d points at the state's OWN sync_prop_through_variable id,
             # not an actual bone - measured on every armed retail entry. freshen()
             # already gave this state's definitions fresh ids, so this is the new
-            # state's id, not the donor's
+            # state's id, not the donor's. Guaranteed present with an id: the
+            # donor was checked once, before the loop, for exactly this
             sync = new_state.find(".//sync_prop_through_variable")
-            if sync is None or sync.get("id") is None:
-                raise ValueError(
-                    f"{spec.clip}: state has no defined "
-                    f"sync_prop_through_variable to bind events to")
             n_ev = append_datastreams(new_state, spec.events, sync.get("id"))
             logging.info(f"  armed {n_ev} event(s) on {spec.clip}")
         soe.append(new_sr)

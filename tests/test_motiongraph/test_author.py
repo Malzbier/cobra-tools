@@ -1038,17 +1038,40 @@ class TestAppendClipsAtomicity:
 		refs = {el.get("ref") for el in new_sr.iter() if el.get("ref") is not None}
 		assert refs <= ids
 
-	@pytest.mark.xfail(reason="a failure part-way through a specs list leaves all "
-							  "three trees half-mutated, and the trees are the caller's",
-					   strict=True)
 	def test_a_later_failure_rolls_the_earlier_specs_back(self):
+		# the donor-structural checks now run once, before the loop, so this
+		# refuses before spec A is ever applied - not a general rollback, but
+		# this exact shape (a later spec needing something the shared donor
+		# lacks) is one of the cases that is now caught up front
 		g, e, c = graph(sync=False), enum(2), choices(2)
-		with pytest.raises(ValueError):
+		with pytest.raises(ValueError, match="sync_prop_through_variable"):
 			append_clips(g, e, c, [clip_spec("A"),
 								   clip_spec("B", events=audio_event())])
 		assert len(g.findall("./state_output_entries/states/statereference")) == 1
 		assert len(list(resolve_enum_holder(e))) == 2
 		assert c.get("count") == "2"
+
+	def test_a_bad_duration_on_a_later_spec_refuses_before_any_spec_lands(self):
+		g, e, c = graph(), enum(2), choices(2)
+		with pytest.raises(ValueError, match="B: clip has no duration"):
+			append_clips(g, e, c, [clip_spec("A"),
+								   clip_spec("B", duration=None)])
+		assert len(g.findall("./state_output_entries/states/statereference")) == 1
+		assert len(list(resolve_enum_holder(e))) == 2
+		assert c.get("count") == "2"
+
+	def test_a_missing_additional_data_streams_refuses_up_front_too(self):
+		g, e, c = graph(streams=False), enum(2), choices(2)
+		with pytest.raises(ValueError, match="additional_data_streams"):
+			append_clips(g, e, c, [clip_spec("A", events=audio_event())])
+		assert len(g.findall("./state_output_entries/states/statereference")) == 1
+
+	def test_no_events_in_the_batch_skips_the_donor_event_checks(self):
+		# sync=False would refuse if any spec had events - none do here, so
+		# the donor-structural check for it must not even run
+		g, e, c = graph(sync=False), enum(2), choices(2)
+		append_clips(g, e, c, [clip_spec("A"), clip_spec("B")])
+		assert len(g.findall("./state_output_entries/states/statereference")) == 3
 
 
 class TestCheckSpecsQualified:
