@@ -30,7 +30,8 @@ optional-dependencies.dev = [
     "pytest-subtests~=0.14.2",
     "lxml~=6.0.2",
     "types-lxml~=2025.8.25",
-    "xmlschema~=4.2.0"
+    "xmlschema~=4.2.0",
+    "mypy~=2.3.0",
 ]
 optional-dependencies.doc = [
     "mkdocs~=1.6.1",
@@ -58,7 +59,9 @@ testpaths = [
 ]
 
 [tool.mypy]
-modules = ["gui", "codegen", "fgm_editor_gui", "ms2_tool_gui", "ovl_tool_gui"]
+modules = ["gui", "codegen", "fgm_editor_gui", "ms2_tool_gui", "ovl_tool_gui",
+    "modules.motiongraph_author", "modules.motiongraph_generator", "modules.prop_builder",
+    "modules.formats.raw_pack", "modules.animspec_rows"]
 strict = true
 exclude = '''(?x)(
     ^__init__\.py$  # 
