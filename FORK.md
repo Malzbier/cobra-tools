@@ -58,31 +58,57 @@ caught up to write them.
 
 ## Does it break anything?
 
-No. Measured against pristine upstream on the same corpus — every entry of all 506
-PC2 scenery assets, same script, same machine:
+**Not currently known — the table below that used to answer "no" is not reproducible,
+and a real bug was found (and partly fixed) while trying to reproduce it.** This
+section previously read "No" backed by a 506-asset preserved/changed/unreadable table
+(upstream `2641/31/6`, fork `2665/13/0`). Re-running that same measurement
+(2026-08-09) could not reproduce those numbers, and while investigating why, found a
+genuine wild-pointer bug that had been present since the fork's first commit.
 
-| | preserved | changed | unreadable |
-|---|---|---|---|
-| upstream `c65ebddf7` | 2641 | 31 | 6 |
-| this fork | **2665** | **13** | **0** |
+**What's confirmed fixed:** a stranded relocation (the pool it pointed at got
+replaced during a rewrite) round-tripped through disk as a `-1` sentinel in two
+fields with different signedness — `pool_index` (signed, reads back `-1`) and
+`data_offset` (unsigned, reads back `4294967295`). The reload path indexed
+`ovs.pools[-1]` with no guard against `-1` (an equivalent guard already existed four
+lines above it, for a sibling table, and was simply missing here) — Python silently
+returns the *last* pool instead of raising, so the pointer resolved to a real but
+unrelated pool at a garbage offset instead of being dropped. Fixed in
+`source/formats/ovl/__init__.py` (+ regenerated `generated/`); full local test suite
+unaffected (594 passed). Details: `.scratch/byte-identical-ovl-writer/issues/45-fragments-reload-unguarded-minus-one.md`
+in the workspace root.
 
-**0 regressions introduced. 18 files fixed. 6 previously unreadable entries now
-load.** The 13 remaining failures are present identically in upstream — 4 animatronic
-`.fgm` and 9 `.ms2`, all pre-existing, none caused by this work.
+**What's confirmed still broken:** fixing the above stopped the wild pointer, but
+exposed a second, separate, currently-open issue — `stream_info` (a `LookupPointer`,
+used by `.ms2` mesh data) can pick the wrong, or a silently-defaulted, buffer index
+after a round trip, because it identifies its target by comparing raw in-memory read
+positions across two independent parses rather than anything stable like a name. A
+100-asset local sample (fork tip, post-fix) showed a 9.7% CHANGED rate (57 of 587
+entries, all `.ms2`) — roughly 8x the rate upstream itself shows on its own full
+corpus (31 of 2672 ≈ 1.2%, remeasured the same session). That gap is this issue, not
+noise. Not yet fixed: `.scratch/byte-identical-ovl-writer/issues/46-stream-info-lookup-index-mismatch.md`.
 
-The `.ms2` failures are characterised but not fixed; see
-`docs/animated-scenery.md` §13 in the companion repo for why a fix needs a carrier
-through the standalone `.ms2` format.
+**What this means for the old table's other claims:** the "18 files fixed, 6
+previously-unreadable now load" part cannot currently be re-confirmed either way — no
+full 506-asset run with the ticket-45 fix applied has been completed yet, only the
+100-asset local sample above. The `.ms2`/`.fgm` pre-existing-upstream-failure
+characterisation two paragraphs below is unrelated to either issue found here and is
+believed still accurate, but hasn't been re-verified alongside this.
 
-This table predates the 2026-08-09 test-coverage pass (14 fixes; see the commit
-history for the full list) and was not re-run at full corpus after it — none of
-those fixes touch the plain load/modify/save path this measures (they live in the
-authoring-only functions `append_clips`, `apply_clip_prefix` and the `.motiongraph`
-root-tail write, none of which a bare corpus scan exercises), so the table is
-expected to still hold. That expectation has direct, fresh support rather than
-resting only on reasoning: a 24-asset PC2 sample was run byte-for-byte identically
-before and after all 14 fixes, same commit history otherwise, and returned the same
-result both times.
+**What's unaffected:** the 2026-08-09 motiongraph test-coverage pass (14 fixes,
+`append_clips`/`apply_clip_prefix`/root-tail write) is unrelated to both issues above —
+bisection confirmed the wild-pointer bug predates that pass entirely (present already
+in the fork's very first commit), and neither issue touches authoring-only code paths.
+The 24-asset before/after sample for that pass (byte-for-byte identical both times)
+still stands on its own terms.
+
+The `.ms2`/`.fgm` pre-existing-upstream failures (4 animatronic `.fgm`, 9 `.ms2`) are
+characterised but not fixed; see `docs/animated-scenery.md` §13 in the companion repo
+for why a `.ms2` fix needs a carrier through the standalone format.
+
+**Next step before this section can honestly say anything stronger than "unknown":** a
+fresh, full 506-asset upstream-vs-fork run, both arms on the ticket-45-fixed code, same
+script, same machine — matching the rigor the original table claimed but that could not
+be reproduced this session.
 
 ---
 
