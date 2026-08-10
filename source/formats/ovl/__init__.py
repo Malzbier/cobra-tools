@@ -1312,6 +1312,19 @@ class OvlFile(Header):
 							loader.root_ptr = (s_pool, s_o)
 					# vectorized like this, it takes virtually no time
 					for l_i, l_o, s_i, s_o, in ovs.fragments:
+						# same "no pool" case rebuild_ovs_arrays' resolve() documents for
+						# uncaught_fragments: a stranded link whose target pool did not
+						# survive a rewrite writes as (-1, -1). s_i round-trips as -1
+						# (pool_index is signed) but s_o round-trips as 4294967295
+						# (data_offset is unsigned), and ovs.pools[-1] does not raise -
+						# it silently returns the LAST pool, so the missing guard here
+						# (present four lines up for root_entries) resolved this to a
+						# real but unrelated pool with a bogus huge offset instead of
+						# dropping the fragment. Measured on AQ_Anchor.ms2's
+						# STATIC-buffer dependency_name pointer, landing on the
+						# archive's last-loaded .tex pool
+						if s_i == -1:
+							continue
 						s_pool = ovs.pools[s_i]
 						# replace offsets pointing to end of pool with None
 						if s_pool.size != s_o:
