@@ -506,7 +506,15 @@ class Pointer(BaseStruct):
 			# brings them back as zeros
 			pi = int(getattr(instance, "pool_index", 0) or 0)
 			off = int(getattr(instance, "data_offset", 0) or 0)
-			if pi or off:
+			# pi < 0 is not a raw retail word to preserve - it is a loader-internal
+			# "no dependency" sentinel (e.g. MS2.py sets -1 on a STATIC buffer's
+			# dependency_name). A real pool_index is never negative. Round-tripping
+			# it through XML as literal -1 let it survive into the rewrite as if it
+			# were a genuine pool selector, unsigned-wrapping to 0xFFFFFFFF and
+			# resolving to a bogus block on the last pool - see the AQ_Anchor.ms2
+			# investigation: pool=4, offset=4294967295, size computed as a huge
+			# negative number
+			if (pi > 0) or off:
 				ET.SubElement(elem, prop).set("raw", f"{pi},{off}")
 			return
 		# only create the sub-element if the pointer has data
